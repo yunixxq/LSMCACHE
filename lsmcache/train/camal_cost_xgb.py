@@ -39,8 +39,8 @@ for num_sample in [12]:  # 原始为100，修改为12(与每个工作负载的�
     X = []
     Y = []
     for _, sample in all_samples.iterrows():
-        if sample["read_io"] + sample["write_io"] == 0:
-            continue
+        # if sample["read_io"] + sample["write_io"] == 0:
+        #     continue
 
         X.append(
             get_cost_uniform(

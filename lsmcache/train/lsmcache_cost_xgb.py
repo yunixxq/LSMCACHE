@@ -60,8 +60,8 @@ for num_sample in [18]:  # 每个工作负载的采样数量，因为工作负�
     for _, sample in all_samples.iterrows():
         if sample["queries"] == 0:
             continue
-        if sample["read_io"] + sample["write_io"] == 0:
-            continue
+        # if sample["read_io"] + sample["write_io"] == 0:
+        #     continue
 
         X1.append(
             get_cost_uniform(
@@ -84,8 +84,8 @@ for num_sample in [18]:  # 每个工作负载的采样数量，因为工作负�
     for _, sample in all_hit_samples.iterrows():
         if sample["queries"] == 0:
             continue
-        if sample["read_io"] + sample["write_io"] == 0:
-            continue
+        # if sample["read_io"] + sample["write_io"] == 0:
+        #     continue
 
         X2.append(
             get_cost_uniform(

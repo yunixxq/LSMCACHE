@@ -8,14 +8,11 @@ import copy
 import random
 import pickle as pkl
 
-sys.path.append("./lrkv")
-from runner import Runner
+sys.path.append("./lsmcache")
+from lsmcache_runner import Runner
 from lsm_tree.PyRocksDB import RocksDB
 from lsm_tree.cost_function import CostFunction
-from lsm_tree.tunner import NominalWorkloadTuning
-from utils import model_lr
 from utils import model_xgb
-from utils.distribution import dist_regression
 
 np.set_printoptions(suppress=True)
 

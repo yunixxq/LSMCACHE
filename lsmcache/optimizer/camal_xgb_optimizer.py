@@ -8,19 +8,16 @@ import copy
 import random
 import pickle as pkl
 
-sys.path.append("./lrkv")
-from runner import Runner
+sys.path.append("./lsmcache")
+from lsmcache_runner import Runner
 from lsm_tree.PyRocksDB import RocksDB
 from lsm_tree.cost_function import CostFunction
-from lsm_tree.tunner import NominalWorkloadTuning
-from utils import model_lr
 from utils import model_xgb
-from utils.distribution import dist_regression
 
 np.set_printoptions(suppress=True)
 
 # ============ 加载全局配置文件 ============
-config_yaml_path = os.path.join("lrkv/config/config.yaml")
+config_yaml_path = os.path.join("lsmcache/config/config_lsm_cache.yaml")
 with open(config_yaml_path) as f:
     config = yaml.load(f, Loader=yaml.FullLoader)
 scaling = config["lsm_tree_config"]["scaling"]
@@ -114,7 +111,7 @@ class Optimizer(object):
             self.logger.info(f"Building DB at size : {N}")
 
             level_cost_models = pkl.load(
-                open(self.config["xgb_model"]["level_xgb_cost_model"], "rb")
+                open(self.config["xgb_model"]["camal_xgb_cost_model"], "rb")
             )            
             (
                 best_T,
@@ -168,17 +165,10 @@ class Optimizer(object):
             for key, val in results.items():
                 self.logger.info(f"{key} : {val}")
                 row[f"{key}"] = val
-            row["write_io"] = (
-                row["bytes_written"]
-                + row["compact_read"]
-                + row["compact_write"]
-                + row["flush_written"]
-            ) / 4096
-            self.logger.info("write_io: {}".format(row["write_io"]))
-            self.logger.info("mbuf: {}".format(row["mbuf"]))
-            # print(row)
+
+
             df.append(row)
-            pd.DataFrame(df).to_csv(self.config["optimizer_path"]["ckpt"])
+            pd.DataFrame(df).to_csv(self.config["optimizer_path"]["camal_ckpt"])
             xgb_t.append(row["total_latency"])
             xgb_h.append(row["cache_hit_rate"])
 
@@ -189,7 +179,7 @@ class Optimizer(object):
             print("xgb_h: ", np.mean(xgb_h))
 
         self.logger.info("Exporting data from lr optimizer")
-        pd.DataFrame(df).to_csv(self.config["optimizer_path"]["final"])
+        pd.DataFrame(df).to_csv(self.config["optimizer_path"]["camal_final"])
         self.logger.info("Finished optimizer\n")
 
 
@@ -198,7 +188,7 @@ if __name__ == "__main__":
     if len(sys.argv) > 1:
         config_yaml_path = sys.argv[1]
     else:
-        config_yaml_path = os.path.join("lrkv/config/config.yaml")
+        config_yaml_path = os.path.join("lsmcache/config/config_lsm_cache.yaml")
 
     with open(config_yaml_path) as f:
         config = yaml.load(f, Loader=yaml.FullLoader)

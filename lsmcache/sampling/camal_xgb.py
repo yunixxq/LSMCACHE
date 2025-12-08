@@ -12,7 +12,6 @@ from sklearn.model_selection import KFold
 sys.path.append("./lsmcache")
 from lsmcache_runner import Runner
 from lsm_tree.PyRocksDB import RocksDB
-from lsm_tree.cost_function import CostFunction
 from utils.model_xgb import traverse_for_T, traverse_for_h, iter_model
 from utils.lsm import *
 
@@ -114,36 +113,14 @@ class LevelCost(object):
         for key, val in results.items():
             self.logger.info(f"{key} : {val}")
             row[f"{key}"] = val
-        cf = CostFunction(
-            row["N"],
-            row["phi"],
-            row["s"] / row["N"],
-            int(4096 * 8 / row["E"]), # entries per page
-            row["E"], # bits
-            row["M"], # bits
-            row["is_leveling_policy"],
-            z0,
-            z1,
-            q,
-            w,
-        )
-        row["L"] = cf.L(row["h"], row["T"])
+
+        row["L"] = estimate_level(N, row["mbuf"], row["T"], E) # E(bytes)
         row["z0"] = z0
         row["z1"] = z1
         row["q"] = q
         row["w"] = w
         row["ratio"] = ratio
-        row["read_io"] = row["read_io"] + row["compact_read"] / 4096  
-        row["write_io"] = (row["compact_write"] + row["flush_written"]) / 4096
 
-        self.logger.info("write_io: {}".format(row["write_io"]))
-        row["read_model_io"] = queries * cf.calculate_read_cost(row["h"], row["T"])
-        row["write_model_io"] = queries * cf.calculate_write_cost(row["h"], row["T"])
-        row["model_io"] = row["read_model_io"] + row["write_model_io"]
-        self.logger.info("mbuf: {}".format(row["mbuf"]))
-        self.logger.info("read_model_io: {}".format(row["read_model_io"]))
-        self.logger.info("write_model_io: {}".format(row["write_model_io"]))
-        self.logger.info("model_io: {}".format(row["model_io"]))
         return row
 
     def sample_around_x0(self, x0, h, lower_bound, upper_bound):

@@ -48,6 +48,10 @@ typedef struct environment
     size_t N = 1e6;
     size_t L = 0;
 
+    // 动态参数调整相关变量
+    size_t epoch_size = 100;           // 每个epoch的步数
+    double adjustment_factor = 0.1;    // 调整幅度 (10%)
+
     int verbose = 0;
     bool destroy_db = true;
 
@@ -218,18 +222,22 @@ int main(int argc, char *argv[])
 
     rocksdb::BlockBasedTableOptions table_options;
 
+    table_options.read_amp_bytes_per_bit = 32; // 启用读放大统计功能
     // 配置Monkey Bloom filter(在不同的level调整bpe)
     table_options.filter_policy.reset(
         rocksdb::NewMonkeyFilterPolicy(
             env.bits_per_element,
             compactor_opt.size_ratio,
             compactor_opt.levels));
-
+    
+    std::shared_ptr<Cache> block_cache;
     // 配置Block Cache
     if (env.cache_cap == 0)
         table_options.no_block_cache = true;
-    else
-        table_options.block_cache = rocksdb::NewLRUCache(env.cache_cap);
+    else{
+        block_cache = rocksdb::NewLRUCache(env.cache_cap);
+        table_options.block_cache = block_cache;
+    }
     rocksdb_opt.table_factory.reset(
         rocksdb::NewBlockBasedTableFactory(table_options));
 
@@ -252,6 +260,11 @@ int main(int argc, char *argv[])
     write_opt.low_pri = true;
     // write_opt.disableWAL = false;
     write_opt.disableWAL = true;
+    // 确保启用读统计信息
+    // rocksdb::ReadOptions read_options;
+    // read_options.read_tier = rocksdb::ReadTier::kReadAllTier;
+    // read_options.fill_cache = true;
+
     DataGenerator *data_gen = new YCSBGenerator(env.N, "uniform", 0.0);
     std::pair<std::string, std::string> key_value;
     auto write_time_start = std::chrono::high_resolution_clock::now();
@@ -313,6 +326,15 @@ int main(int argc, char *argv[])
     rocksdb::get_perf_context()->Reset();
     std::mt19937 engine;
     std::uniform_real_distribution<double> dist(0, 1);
+
+    // 动态调参的相关变量
+    double prev_hit_rate = 0.0;
+    uint64_t epoch_start_hit = 0;
+    uint64_t epoch_start_miss = 0;
+    size_t current_cache_cap = env.cache_cap;
+    size_t current_buffer = env.B;
+    spdlog::info("Dynamic adjustment enabled: epoch_size={}, adjustment_factor={}", 
+                 env.epoch_size, env.adjustment_factor);
 
     // ============================== Step4.执行查询(workload执行逻辑) =====================================
     double p[] = {env.empty_reads, env.non_empty_reads, env.range_reads, env.writes};
@@ -409,6 +431,8 @@ int main(int argc, char *argv[])
     }
     run_per_level = run_per_level.substr(0, run_per_level.size() - 2) + "]";
     spdlog::info("files_per_level : {}", run_per_level);
+
+    stats.clear();
     rocksdb_opt.statistics->getTickerMap(&stats);
 
     spdlog::info("(l0, l1, l2plus) : ({}, {}, {})",
@@ -424,14 +448,13 @@ int main(int argc, char *argv[])
                  stats["rocksdb.compact.read.bytes"],
                  stats["rocksdb.compact.write.bytes"],
                  stats["rocksdb.flush.write.bytes"]);
-    spdlog::info("(write_io) : ({})", (stats["rocksdb.bytes.written"] +
-                                       stats["rocksdb.compact.read.bytes"] +
-                                       stats["rocksdb.compact.write.bytes"] +
-                                       stats["rocksdb.flush.write.bytes"]) /
-                                          4096);
+    spdlog::info("(total_read, estimate_read) : ({}, {})",
+                 stats["rocksdb.read.amp.total.read.bytes"],
+                 stats["rocksdb.read.amp.estimate.useful.bytes"]);
 
-    spdlog::info("(read_io) : ({})", rocksdb::get_perf_context()->block_read_count);
     spdlog::info("(total_latency) : ({})", latency);
+    
+    // 命中率相关
     double cache_hit_rate = stats["rocksdb.block.cache.miss"] == 0 ? 0 : double(stats["rocksdb.block.cache.hit"]) / double(stats["rocksdb.block.cache.hit"] + stats["rocksdb.block.cache.miss"]);
     if (cache_hit_rate < 1e-3)
         spdlog::info("(cache_hit_rate) : ({})", 0.0);
@@ -439,8 +462,6 @@ int main(int argc, char *argv[])
         spdlog::info("(cache_hit_rate) : ({})", cache_hit_rate);
     spdlog::info("(cache_hit) : ({})", stats["rocksdb.block.cache.hit"]);
     spdlog::info("(cache_miss) : ({})", stats["rocksdb.block.cache.miss"]);
-    // xxq's test
-    spdlog::info("(wal_bytes) : ({})", stats["rocksdb.wal.bytes"]);
 
     db->GetColumnFamilyMetaData(&cf_meta);
 

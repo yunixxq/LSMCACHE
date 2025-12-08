@@ -58,7 +58,7 @@ samples_path:
 
 
 optimizer_path:
-    ckpt: "data/optimizer_uniform_ckpt.csv"
-    ckpt2: "data/optimizer_uniform_ckpt2.csv"
-    final: "data/optimizer_uniform_final.csv"
-    final2: "data/optimizer_uniform_final2.csv"
+    camal_ckpt: "data/optimizer_camal_ckpt.csv"
+    lsmcache_ckpt: "data/optimizer_lsmcache_ckpt.csv"
+    camal_final: "data/optimizer_camal_final.csv"
+    lsmcache_final: "data/optimizer_lsmcache_final.csv"

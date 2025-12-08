@@ -39,16 +39,11 @@ class RocksDB(object):
             r"\((-?\d+), (-?\d+), (-?\d+), (-?\d+)\)"
         )
 
-        # 通过regex来解析执行RocksDB过程中的C++输出
-        # eg. “[14:32:11.123][info] (read_io) : (1456)”
-        self.read_io_prog = re.compile(
-            r"\[[0-9:.]+\]\[info\] \(read_io\) : " r"\((-?\d+)\)"
+        self.read_bytes_prog = re.compile(
+            r"\[[0-9:.]+\]\[info\] \(total_read, estimate_read\) : "
+            r"\((-?\d+), (-?\d+)\)"
         )
 
-        # xxq's test wal Bytes
-        self.wal_bytes_prog = re.compile(
-            r"\[[0-9:.]+\]\[info\] \(wal_bytes\) : " r"\((-?\d+)\)"
-        )
 
         self.files_per_level_prog = re.compile(
             r"\[[0-9:.]+\]\[info\] files_per_level : " r"(\[[0-9,\s]+\])"
@@ -183,7 +178,7 @@ class RocksDB(object):
             timeout = 10 * 60 * 60
             proc_results, _ = proc.communicate(timeout=timeout)
             print("\n======= RAW OUTPUT FROM ROCKSDB EXECUTION =======\n")
-            print(proc_results[:1000])  # 先只打印前 1000 字符
+            print(proc_results[:2000])  # 先只打印前 1000 字符
             print("\n================================================\n")
         except subprocess.TimeoutExpired:
             self.logger.warn("Timeout limit reached. Aborting")
@@ -198,7 +193,7 @@ class RocksDB(object):
             results["compact_read"] = 0
             results["compact_write"] = 0
             results["flush_written"] = 0
-            results["read_io"] = 0
+            # results["read_io"] = 0
             results["files_per_level"] = 0
             results["size_per_level"] = 0
             results["total_latency"] = 0
@@ -211,8 +206,7 @@ class RocksDB(object):
             level_hit_results = [int(result) for result in self.level_hit_prog.search(proc_results).groups()]  # type: ignore
             bf_count_results = [int(result) for result in self.bf_count_prog.search(proc_results).groups()]  # type: ignore
             compaction_results = [int(result) for result in self.compaction_bytes_prog.search(proc_results).groups()]  # type: ignore
-            read_io_result = [int(result) for result in self.read_io_prog.search(proc_results).groups()]  # type: ignore
-            wal_bytes_result = [int(result) for result in self.wal_bytes_prog.search(proc_results).groups()]
+            read_results = [int(result) for result in self.read_bytes_prog.search(proc_results).groups()]
 
             files_per_level = self.files_per_level_prog.findall(proc_results)[0]
             size_per_level = self.size_per_level_prog.findall(proc_results)[0]
@@ -249,9 +243,15 @@ class RocksDB(object):
             results["compact_write"] = compaction_results[2]
             results["flush_written"] = compaction_results[3]
 
-            results["read_io"] = read_io_result[0]
-            # xxq's test
-            results["wal_bytes"] = wal_bytes_result[0]
+            results["total_read"] = read_results[0]
+            results["estimate_read"] = read_results[1]
+
+            results["write_cost"] = results["bytes_written"] + results["compact_write"] + results["flush_written"]
+            results["read_cost"] = results["total_read"] + results["compact_read"]
+
+            # 不要直接计算，因为可能会存在分母为0的情况
+            # results["WA"] = results["bytes_written"] / results["write_cost"]
+            # results["RA"] = results["total_read"] / results["estimate_read"]
 
             results["files_per_level"] = files_per_level.strip()
             results["size_per_level"] = size_per_level.strip()
@@ -281,7 +281,7 @@ class RocksDB(object):
             results["compact_read"] = 0
             results["compact_write"] = 0
             results["flush_written"] = 0
-            results["read_io"] = 0
+            # results["read_io"] = 0
             results["files_per_level"] = 0
             results["size_per_level"] = 0
             results["total_latency"] = 0

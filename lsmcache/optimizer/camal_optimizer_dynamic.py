@@ -9,7 +9,7 @@ import yaml
 import pickle as pkl
 from multiprocessing import Process
 
-sys.path.append("./lrkv")
+sys.path.append("./lsmcache")
 from lsmcache_runner import Runner
 from lsm_tree.PyRocksDB import RocksDB
 from lsm_tree.cost_function import CostFunction

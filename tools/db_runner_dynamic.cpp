@@ -229,17 +229,6 @@ void update_param(environment env, std::vector<double> workload, int cur_N,
             printf("Set write_buffer_size fail: code=%d\n", status1.code());
         }
         compactor->updateM(env.B);// 动态更新，后续使用新的B进行判断
-
-        // env.cache_cap = (1 - env.ratio) * (env.M - env.bits_per_element * cur_N) / 8;
-        // env.cache_cap = int(env.cache_cap);
-
-        // std::shared_ptr<rocksdb::Cache> new_cache = rocksdb::NewLRUCache(env.cache_cap);
-        // rocksdb::Status status2 = db->SetOptions({{"block_cache", new_cache}});
-        // if (!status2.ok()) 
-        // {
-        //     printf("Error updating block cache: code=%d\n", status2.code());
-        // }
-
     }
 
     // 似乎没必要，但是判断一次也无妨
