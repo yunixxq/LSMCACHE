@@ -17,7 +17,7 @@ from utils import model_xgb
 np.set_printoptions(suppress=True)
 
 # ============ 加载全局配置文件 ============
-config_yaml_path = os.path.join("lrkv/config/config.yaml")
+config_yaml_path = os.path.join("lsmcache/config/config_lsm_cache.yaml")
 with open(config_yaml_path) as f:
     config = yaml.load(f, Loader=yaml.FullLoader)
 scaling = config["lsm_tree_config"]["scaling"]
@@ -108,13 +108,14 @@ class Optimizer(object):
                 os.makedirs(key_path)
             key_log = key_path + "/{}.dat".format(i)
             row["key_log"] = key_log
-            self.logger.info(f"Building DB at size : {N}")
+            self.logger.info(f"Building DB at size: {N}")
 
+            # ✅加载lsmcache的xgb模型(cost + hit)
             level_cost_models = pkl.load(
-                open(self.config["xgb_model"]["level_xgb_cost_model2"], "rb")
+                open(self.config["xgb_model"]["lsmcache_xgb_cost_model"], "rb")
             )
             level_cost_hit_models = pkl.load(
-                open(self.config["xgb_model"]["level_xgb_cost_hit_model2"], "rb")
+                open(self.config["xgb_model"]["lsmcache_xgb_hit_model"], "rb")
             )
             (
                 best_T,
@@ -133,11 +134,12 @@ class Optimizer(object):
                 N,
             )
             row["is_leveling_policy"] = True
-            print(
-                f"level_optimizer: best_T: {best_T}, best_h: {best_h}, best_ratio: {best_ratio}"
-            )
+            # print(
+            #     f"level_optimizer: best_T: {best_T}, best_h: {best_h}, best_ratio: {best_ratio}"
+            # )
             row["T"] = int(best_T)
-            row["h"] = best_h
+            row["h"] = best_h # bpe
+            row["ratio"] = best_ratio
             row["mbuf"] = best_ratio * (M - best_h * N) / 8 # bytes
             row["cache_cap"] = (1 - best_ratio) * (M - best_h * N) / 8 # bytes
             self.logger.info(f"Building DB at size : {N}")
@@ -163,7 +165,12 @@ class Optimizer(object):
                 cache_cap=row["cache_cap"], # 根据最佳h和ratio计算得到的块缓存大小
                 key_log=key_log,
                 scaling=scaling,
+                # 动态调参相关参数
+                enable_dynamic_tuning=True,
+                initial_alpha=row["ratio"],
+                enable_epoch_log=True,
             )
+
             for key, val in results.items():
                 self.logger.info(f"{key} : {val}")
                 row[f"{key}"] = val
@@ -177,7 +184,7 @@ class Optimizer(object):
             self.logger.info("mbuf: {}".format(row["mbuf"]))
             # print(row)
             df.append(row)
-            pd.DataFrame(df).to_csv(self.config["optimizer_path"]["ckpt2"])
+            pd.DataFrame(df).to_csv(self.config["optimizer_path"]["lsmcache_ckpt"])
             xgb_t.append(row["total_latency"])
             xgb_h.append(row["cache_hit_rate"])
 
@@ -188,7 +195,7 @@ class Optimizer(object):
             print("xgb_h: ", np.mean(xgb_h))
 
         self.logger.info("Exporting data from lr optimizer")
-        pd.DataFrame(df).to_csv(self.config["optimizer_path"]["final2"])
+        pd.DataFrame(df).to_csv(self.config["optimizer_path"]["lsmcache_final"])
         self.logger.info("Finished optimizer\n")
 
 
@@ -197,7 +204,7 @@ if __name__ == "__main__":
     if len(sys.argv) > 1:
         config_yaml_path = sys.argv[1]
     else:
-        config_yaml_path = os.path.join("lrkv/config/config.yaml")
+        config_yaml_path = os.path.join("lsmcache/config/config_lsm_cache.yaml")
 
     with open(config_yaml_path) as f:
         config = yaml.load(f, Loader=yaml.FullLoader)

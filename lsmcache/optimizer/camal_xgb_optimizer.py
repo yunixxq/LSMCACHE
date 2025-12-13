@@ -131,9 +131,9 @@ class Optimizer(object):
                 N,
             )
             row["is_leveling_policy"] = True
-            print(
-                f"level_optimizer: best_T: {best_T}, best_h: {best_h}, best_ratio: {best_ratio}, best_var: {best_var}, best_cost:{best_cost*Q}"
-            )
+            # print(
+            #     f"level_optimizer: best_T: {best_T}, best_h: {best_h}, best_ratio: {best_ratio}, best_var: {best_var}, best_cost:{best_cost*Q}"
+            # )
             row["T"] = int(best_T)
             row["h"] = best_h
             row["mbuf"] = best_ratio * (M - best_h * N) / 8 # bytes

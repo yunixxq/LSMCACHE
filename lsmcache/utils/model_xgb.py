@@ -46,7 +46,7 @@ def prepare_df(samples, save_path):
         row = {}
         if sample["read_io"] + sample["write_io"] == 0:
             continue
-        l = estimate_level(sample["N"], sample["mbuf"], sample["T"], get_ceiling=False)
+        l = estimate_level(sample["N"], sample["mbuf"] / 2, sample["T"], get_ceiling=False)
         fpr = np.exp(-1 * sample["h"] * (np.log(2) ** 2))
         data = np.zeros([int(sample["N"])])
         with open(sample["key_log"], "r") as f:
@@ -97,7 +97,7 @@ def get_cache(current_T, current_h, current_ratio, alpha, c, z0, z1, q, w, M, N)
     fpr = estimate_fpr(current_h)
     buffer = current_ratio * (M - current_h * N)
     cache_cap = (1 - current_ratio) * (M - current_h * N) / 8
-    l = estimate_level(N, buffer, current_T)
+    l = estimate_level(N, buffer / 2, current_T)
     return [alpha, c, z0, z1, q, w, current_T, l, fpr, cache_cap, buffer]
 
 
@@ -117,7 +117,7 @@ def get_cost_uniform(
     fpr = estimate_fpr(current_h)
     buffer = current_ratio * (M - current_h * N) / 8 # write buffer in bytes
     cache_cap = (1 - current_ratio) * (M - current_h * N) / 8 # cache capacity in bytes
-    l = estimate_level(N, buffer, current_T, E)
+    l = estimate_level(N, buffer / 2, current_T, E)
     return [z0, z1, q, w, current_T, l, fpr, cache_cap, buffer]
 
 
@@ -138,7 +138,7 @@ def get_cost(
     fpr = estimate_fpr(current_h)
     buffer = current_ratio * (M - current_h * N)
     cache_cap = (1 - current_ratio) * M / 8
-    l = estimate_level(N, buffer, current_T)
+    l = estimate_level(N, buffer / 2, current_T)
     return [alpha, c, z0, z1, q, w, current_T, l, fpr, cache_cap, buffer, y_cache]
 
 # CAMAL
@@ -233,10 +233,10 @@ def traverse_var_optimizer_uniform2(cost_models, cost_hit_models, policy, z0, z1
         hit_preds.append((hit_mean, setting))
     hit_preds.sort(key=lambda x: -x[0])  # 从大到小排序
     best_hit_rate, best_setting = hit_preds[0]
-    print("best_setting = ", best_setting, "len=", len(best_setting))
+    # print("best_setting = ", best_setting, "len=", len(best_setting))
     best_T, best_h, best_ratio = best_setting
 
-    print(f"[Optimizer] 搜索耗时: {time.time() - start_time:.3f}s")
+    print(f"[Optimizer] 搜索静态最优配置耗时: {time.time() - start_time:.3f}s")
     print(f"[Optimizer] Best(T={best_T}, h={best_h}, ratio={best_ratio}), hit={best_hit_rate}")
 
     # 返回值格式保持与原始API一致

@@ -331,7 +331,7 @@ int main(int argc, char *argv[])
     compactor_opt.entry_size = env.E;
     compactor_opt.bits_per_element = env.bits_per_element;
     compactor_opt.num_entries = env.N;
-    compactor_opt.levels = tmpdb::Compactor::estimate_levels(env.N, env.T, env.E, env.B) + 1;
+    compactor_opt.levels = tmpdb::Compactor::estimate_levels(env.N, env.T, env.E, env.B / 2) + 1;
     rocksdb_opt.num_levels = compactor_opt.levels + 1;
     compactor = new tmpdb::Compactor(compactor_opt, rocksdb_opt);
     rocksdb_opt.listeners.emplace_back(compactor);

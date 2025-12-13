@@ -8,5 +8,6 @@ conda deactivate
 
 # 删除旧的临时目录
 rm -rf /tmp/level_cost
+rm -rf /tmp/level_optimizer
 
 python3 

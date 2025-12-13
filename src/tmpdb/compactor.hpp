@@ -64,6 +64,75 @@ namespace tmpdb
               is_a_retry(is_a_retry) {}
     } CompactionTask;
 
+    // 新增：Compaction 统计结构
+    struct CompactionStats
+    {
+        // ===== Flush 统计 =====
+        std::atomic<uint64_t> total_flush_count{0};
+        std::atomic<uint64_t> epoch_flush_count{0};
+        
+        // ===== Compaction 计数 =====
+        std::atomic<uint64_t> total_compaction_count{0};
+        std::atomic<uint64_t> epoch_compaction_count{0};
+        
+        // ===== 文件统计 =====
+        std::atomic<uint64_t> total_input_files{0};
+        std::atomic<uint64_t> epoch_input_files{0};
+        std::atomic<uint64_t> total_output_files{0};
+        std::atomic<uint64_t> epoch_output_files{0};
+        
+        // ===== 字节统计 =====
+        std::atomic<uint64_t> total_compaction_read_bytes{0};
+        std::atomic<uint64_t> epoch_compaction_read_bytes{0};
+        std::atomic<uint64_t> total_compaction_write_bytes{0};
+        std::atomic<uint64_t> epoch_compaction_write_bytes{0};
+        
+        // ===== 时间统计 =====
+        std::atomic<uint64_t> total_compaction_time_us{0};
+        std::atomic<uint64_t> epoch_compaction_time_us{0};
+        
+        // ===== 每层统计 =====
+        static constexpr int MAX_LEVELS = 16;
+        std::atomic<uint64_t> compaction_count_per_level[MAX_LEVELS] = {};
+        
+        // ===== 时间戳 =====
+        std::chrono::steady_clock::time_point epoch_start_time;
+        
+        CompactionStats() {
+            epoch_start_time = std::chrono::steady_clock::now();
+        }
+        
+        // 重置epoch统计（每个监测周期调用）
+        void reset_epoch() {
+            epoch_flush_count = 0;
+            epoch_compaction_count = 0;
+            epoch_input_files = 0;
+            epoch_output_files = 0;
+            epoch_compaction_read_bytes = 0;
+            epoch_compaction_write_bytes = 0;
+            epoch_compaction_time_us = 0;
+            epoch_start_time = std::chrono::steady_clock::now();
+        }
+        
+        // 获取epoch持续时间（秒）
+        double get_epoch_duration_seconds() const {
+            auto now = std::chrono::steady_clock::now();
+            return std::chrono::duration<double>(now - epoch_start_time).count();
+        }
+
+        // 获取epoch内的compaction频率（次/秒）
+        double get_epoch_compaction_rate() const {
+            double duration = get_epoch_duration_seconds();
+            return duration > 0 ? epoch_compaction_count / duration : 0.0;
+        }
+
+        // 获取epoch内的flush频率（次/秒）
+        double get_epoch_flush_rate() const {
+            double duration = get_epoch_duration_seconds();
+            return duration > 0 ? epoch_flush_count / duration : 0.0;
+        }
+    };
+
     class BaseCompactor : public ROCKSDB_NAMESPACE::EventListener
     {
     public:
@@ -107,6 +176,9 @@ namespace tmpdb
         std::mutex meta_data_mutex;
         std::atomic<int> compactions_left_count;
 
+        // ===== 新增：统计信息 =====
+        CompactionStats stats;
+
         /**
          * @brief Construct a new Compactor object
          *
@@ -148,6 +220,8 @@ namespace tmpdb
          */
         void OnFlushCompleted(rocksdb::DB *db, const ROCKSDB_NAMESPACE::FlushJobInfo &info) override;
 
+        // ===== 新增：Compaction 完成回调 =====
+        void OnCompactionCompleted(rocksdb::DB *db, const ROCKSDB_NAMESPACE::CompactionJobInfo &info) override;
         /**
          * @brief
          *
@@ -187,6 +261,8 @@ namespace tmpdb
         static size_t calculate_full_tree(double T, size_t E, size_t B, size_t L);
         void updateT(int T);
         void updateM(size_t M);
+        // ===== 新增：获取统计快照(暂未使用) =====
+        // CompactionStats get_stats_snapshot() const { return stats; }
     };
 
 } /* namespace tmpdb */

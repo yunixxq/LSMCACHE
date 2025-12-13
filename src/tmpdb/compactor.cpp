@@ -2,6 +2,8 @@
 
 using namespace tmpdb;
 using namespace ROCKSDB_NAMESPACE;
+
+// BaseCompactor 构造函数（保持不变）
 BaseCompactor::BaseCompactor(const CompactorOptions compactor_opt, const rocksdb::Options rocksdb_opt)
     : compactor_opt(compactor_opt), rocksdb_opt(rocksdb_opt), rocksdb_compact_opt()
 {
@@ -9,7 +11,8 @@ BaseCompactor::BaseCompactor(const CompactorOptions compactor_opt, const rocksdb
     this->rocksdb_compact_opt.output_file_size_limit = this->rocksdb_opt.target_file_size_base;// 压缩生成文件的目标大小=RocksDB中配置的target_file_size_base
     this->level_being_compacted = std::vector<bool>(this->rocksdb_opt.num_levels, false);// 标记每一层是否正在被 compaction，用于避免同一层被多次并发压缩
 }
-// 寻找“最深的非空层”
+
+// 辅助函数：寻找“最深的非空层”，用于选择Compaction的层
 int Compactor::largest_occupied_level(rocksdb::DB *db) const
 {
     rocksdb::ColumnFamilyMetaData cf_meta;
@@ -27,7 +30,8 @@ int Compactor::largest_occupied_level(rocksdb::DB *db) const
     }
     return largest_level_idx;
 }
-// debug：打印每一层有哪些文件（辅助函数）
+
+// 辅助函数：打印每一层有哪些文件（
 void print_db_status1(rocksdb::DB *db)
 {
     spdlog::debug("Files per level");
@@ -48,6 +52,7 @@ void print_db_status1(rocksdb::DB *db)
         level_idx++;
     }
 }
+
 // 🌟PickCompaction：核心逻辑(选哪些文件、往哪一层压)
 CompactionTask *Compactor::PickCompaction(rocksdb::DB *db,
                                           const std::string &cf_name,
@@ -55,9 +60,8 @@ CompactionTask *Compactor::PickCompaction(rocksdb::DB *db,
 {
     /*读取当前 level 的文件情况*/
     this->meta_data_mutex.lock(); // 访问元数据时加锁（多线程安全
-    size_t T = this->compactor_opt.size_ratio;
-    size_t K = this->compactor_opt.K;
-    // int largest_level_idx = this->largest_occupied_level(db);
+    size_t T = this->compactor_opt.size_ratio; // ✅
+
     rocksdb::ColumnFamilyMetaData cf_meta;
     db->GetColumnFamilyMetaData(&cf_meta);
 
@@ -65,160 +69,108 @@ CompactionTask *Compactor::PickCompaction(rocksdb::DB *db,
     size_t level_size = 0;
     for (auto &file : cf_meta.levels[level_idx].files)
     {
-        if (file.being_compacted) // 正在压缩的文件跳过
+        if (file.being_compacted) // ✅正在压缩的文件跳过
         {
             continue;
         }
         input_file_names.push_back(file.name);
         level_size += file.size;
     }
-    // 这个 level 没有可压缩的文件，直接返回
-    if (input_file_names.size() < 1)
+
+    // ✅该层没有可压缩的文件，释放锁直接返回
+    if (input_file_names.empty())
     {
         this->meta_data_mutex.unlock();
         return nullptr;
     }
 
-    // Level 0 的处理逻辑：任意合并 + 选择最“空”的目标层
-    if (level_idx == 0)
+    if (level_idx == 0) // L0处理逻辑：固定Compact至L1且实现容量阈值触发
     {
-        if (input_file_names.size() >= 1)
+        // L0阈值： (T-1) * Mbuf
+        if(level_size <= (T - 1) * this->compactor_opt.buffer_size)
         {
-            // pick targer output level
-            int target_lvl = 1;
-            size_t min_size = UINT64_MAX;
-            std::vector<size_t> empty_levels;
-            for (size_t i = 1; i < compactor_opt.levels - 1; i++)
-            {
-                size_t lvl_size = 0;
-                for (auto &file : cf_meta.levels[i].files)
-                {
-                    if (file.being_compacted)
-                    {
-                        lvl_size += this->rocksdb_opt.target_file_size_base;
-                        continue;
-                    }
-                    lvl_size += file.size;
-                }
-                if (lvl_size < min_size)
-                {
-                    min_size = lvl_size;
-                    target_lvl = i;
-                }
-                if (lvl_size < min_size + this->rocksdb_opt.target_file_size_base && min_size != 0)
-                {
-                    empty_levels.push_back(i);
-                }
-            }
-            if (!empty_levels.empty())
-            {
-                size_t random_index = std::rand() % empty_levels.size();
-                target_lvl = empty_levels[random_index];
-            }
-            // pick input file
-            std::vector<std::string> compact_files;
-            for (auto &file : cf_meta.levels[0].files)
-            {
-                if (file.being_compacted)
-                {
-                    continue;
-                }
-                compact_files.push_back(file.name);
-            }
             this->meta_data_mutex.unlock();
-            if (compact_files.empty())
-                return nullptr;
-            return new CompactionTask(db, this, cf_name, compact_files, target_lvl,
-                                      this->rocksdb_compact_opt, level_idx, false,
-                                      false);
+            return nullptr;
         }
+
+        // L0压缩至的目标层固定为L1
+        int target_lvl = 1;
+        spdlog::debug("PickCompaction: L0 -> L{}, files_num={}", 
+                      target_lvl, input_file_names.size());
+        
+        this->meta_data_mutex.unlock();  // ✅ 添加 unlock
+        return new CompactionTask(db, this, cf_name, input_file_names, target_lvl,
+                                      this->rocksdb_compact_opt, level_idx, false,
+                                      false);    
     }
     else //L1+层
     {
-        for (size_t i = 0; i < (this->compactor_opt.levels / K); i++)
+        uint64_t level_capacity = static_cast<uint64_t>(
+            std::pow(T, level_idx) * (T - 1) * this->compactor_opt.buffer_size
+        );
+
+        // 未超过容量阈值，无需触发Compaction
+        if (level_size <= level_capacity)
         {
-            if (i * K < level_idx && level_idx <= (i + 1) * K)
+            this->meta_data_mutex.unlock();
+            return nullptr;
+        }
+
+        // 选择要Compaction的文件直至剩余容量低于阈值
+        std::vector<std::string> compact_files;
+        size_t compaction_size = 0;
+
+        for (auto &file : cf_meta.levels[level_idx].files)
+        {
+            if (file.being_compacted)
             {
-                // get input level size
-                size_t lvl_size = 0;
-                for (auto &file : cf_meta.levels[level_idx].files)
-                {
-                    if (file.being_compacted)
-                    {
-                        continue;
-                    }
-                    lvl_size += file.size;
-                }
-                if (lvl_size < pow(T, i) * this->compactor_opt.buffer_size / K)
-                    continue;
-                std::vector<std::string> compact_files;
-                std::vector<rocksdb::SstFileMetaData> compact_files_meta;
-                size_t compaction_size = 0;
-                // bool flag = false;
-                for (auto &file : cf_meta.levels[level_idx].files)
-                {
-                    if (file.being_compacted)
-                    {
-                        continue;
-                    }
-                    compact_files.push_back(file.name);
-                    compact_files_meta.push_back(file);
-                    compaction_size += file.size;
-                    if ((lvl_size - compaction_size) <
-                        pow(T, i) * this->compactor_opt.buffer_size / K)
-                        break;
-                }
-                // pick target output level
-                int target_lvl = (i + 1) * K + 1;
-                std::vector<size_t> empty_levels;
-                size_t min_size = UINT64_MAX;
-                for (size_t j = (i + 1) * K + 1; j < compactor_opt.levels - 1;
-                     j++)
-                {
-                    size_t lvl_size = 0;
-                    for (auto &file : cf_meta.levels[j].files)
-                    {
-                        if (file.being_compacted)
-                        {
-                            lvl_size += this->rocksdb_opt.target_file_size_base;
-                            continue;
-                        }
-                        lvl_size += file.size;
-                    }
-                    if (lvl_size < min_size)
-                    {
-                        min_size = lvl_size;
-                        target_lvl = j;
-                    }
-                    if (lvl_size < min_size + this->rocksdb_opt.target_file_size_base && min_size != 0)
-                    {
-                        empty_levels.push_back(j);
-                    }
-                }
-                if (!empty_levels.empty())
-                {
-                    size_t random_index = std::rand() % empty_levels.size();
-                    target_lvl = empty_levels[random_index];
-                }
-                this->meta_data_mutex.unlock();
-                if (compact_files.empty())
-                    return nullptr;
-                return new CompactionTask(db, this, cf_name, compact_files, target_lvl,
-                                          this->rocksdb_compact_opt, level_idx, false,
-                                          false);
+                continue;
+            }
+            compact_files.push_back(file.name);
+            compaction_size += file.size;
+            
+            // 如果 compact 这些文件后，剩余容量低于阈值，停止选择
+            if ((level_size - compaction_size) <= level_capacity)
+            {
+                break;
             }
         }
+
+        if (compact_files.empty())
+        {
+            this->meta_data_mutex.unlock();
+            return nullptr;
+        }
+        
+        int target_lvl = level_idx + 1;
+
+        // 检查目标层是否有效
+        if (target_lvl >= static_cast<int>(cf_meta.levels.size()))
+        {
+            this->meta_data_mutex.unlock();
+            return nullptr;
+        }
+
+        spdlog::debug("PickCompaction: L{} -> L{}, files={}, size={} bytes",
+                      level_idx, target_lvl, compact_files.size(), compaction_size);
+        this->meta_data_mutex.unlock();
+        return new CompactionTask(db, this, cf_name, compact_files, target_lvl,
+                                  this->rocksdb_compact_opt, level_idx, false, false);
     }
-    this->meta_data_mutex.unlock();
-    return nullptr;
 }
 
-// 每次flush后尝试对所有层触发compaction
+// 🌟OnFlushCompleted：每次flush后尝试对所有层触发compaction 修改：添加flush数量统计信息
 // → Compactor::OnFlushCompleted → PickCompaction → ScheduleCompaction
 void Compactor::OnFlushCompleted(rocksdb::DB *db, const ROCKSDB_NAMESPACE::FlushJobInfo &info)
 {
+    // ===== 记录 Flush 统计 =====
+    stats.total_flush_count++;
+    stats.epoch_flush_count++;
+
+    // 检查每一层是否需要Compaction，从L0开始向下遍历所有非空层
     int largest_level_idx = this->largest_occupied_level(db);
-    //选择从 L0 向下遍历所有非空层
+
+    int count = 0;
     for (int level_idx = 0; level_idx <= largest_level_idx; level_idx++)
     {
         CompactionTask *task = nullptr;
@@ -231,21 +183,74 @@ void Compactor::OnFlushCompleted(rocksdb::DB *db, const ROCKSDB_NAMESPACE::Flush
             }
             // Schedule compaction in a different thread.
             ScheduleCompaction(task);
+            count++;
         }
     }
-    // this->requires_compaction(db);
-    return;
+    // 检查一次flush是否会引发级联的多次Compaction
+    printf("OnFlushCompleted: triggered %d compactions after flush\n", count);
 }
 
-//手动触发一轮全面扫描
+// ✅新增：OnCompactionCompleted
+void Compactor::OnCompactionCompleted(rocksdb::DB *db, const ROCKSDB_NAMESPACE::CompactionJobInfo &info)
+{
+    // ===== 记录 Compaction 统计 =====
+    stats.total_compaction_count++;
+    stats.epoch_compaction_count++;
+    
+    stats.total_input_files += info.input_files.size();
+    stats.epoch_input_files += info.input_files.size();
+    
+    stats.total_output_files += info.output_files.size();
+    stats.epoch_output_files += info.output_files.size();
+    
+    // 记录读写字节数
+    stats.total_compaction_read_bytes += info.stats.total_input_bytes;
+    stats.epoch_compaction_read_bytes += info.stats.total_input_bytes;
+    
+    stats.total_compaction_write_bytes += info.stats.total_output_bytes;
+    stats.epoch_compaction_write_bytes += info.stats.total_output_bytes;
+    
+    // 记录时间
+    stats.total_compaction_time_us += info.stats.elapsed_micros;
+    stats.epoch_compaction_time_us += info.stats.elapsed_micros;
+    
+    // 记录每层统计
+    if (info.output_level < CompactionStats::MAX_LEVELS) {
+        stats.compaction_count_per_level[info.output_level]++;
+    }
+    
+    spdlog::debug("Compaction completed: L{} -> L{}, "
+                  "input_files={}, output_files={}, "
+                  "read_bytes={}, write_bytes={}, time={}us",
+                  info.base_input_level, info.output_level,
+                  info.input_files.size(), info.output_files.size(),
+                  info.stats.total_input_bytes, info.stats.total_output_bytes,
+                  info.stats.elapsed_micros);
+    
+    // ===== 检查级联 Compaction =====
+    // Compaction 完成后，目标层可能超过容量阈值
+    // 需要检查是否触发新的 Compaction
+    
+    // 只检查从output_level开始的层（因为只有这些层可能受影响）
+    int largest_level_idx = this->largest_occupied_level(db);
+    
+    for (int level_idx = info.output_level; level_idx <= largest_level_idx; level_idx++)
+    {
+        CompactionTask *task = PickCompaction(db, info.cf_name, level_idx);
+        if (task != nullptr)
+        {
+            spdlog::debug("Cascade compaction triggered: L{} -> L{}",
+                          level_idx, task->output_level);
+            ScheduleCompaction(task);
+        }
+    }
+}
+
 bool Compactor::requires_compaction(rocksdb::DB *db)
 {
-    // this->meta_data_mutex.lock();
     int largest_level_idx = this->largest_occupied_level(db);
-    // this->meta_data_mutex.unlock();
     bool task_scheduled = false;
 
-    // for (int level_idx = largest_level_idx; level_idx > -1; level_idx--)
     for (int level_idx = 0; level_idx <= largest_level_idx; level_idx++)
     {
         CompactionTask *task = nullptr;
@@ -254,7 +259,6 @@ bool Compactor::requires_compaction(rocksdb::DB *db)
         {
             continue;
         }
-        // spdlog::info("req compaction from {} to {}", task->origin_level_id, task->output_level);
         ScheduleCompaction(task);
         task_scheduled = true;
     }
@@ -269,13 +273,60 @@ void Compactor::CompactFiles(void *arg)
     assert(task->db);
     assert(task->output_level > (int)task->origin_level_id);
 
-    // 调 RocksDB 内部接口，合并多个 SST 文件到目标层
+    spdlog::info("CompactFiles starting: L{} -> L{}, files={}",
+                  task->origin_level_id, task->output_level,
+                  task->input_file_names.size());
+    
+    // auto start_time = std::chrono::steady_clock::now();
+    // 实际执行Compaction：RocksDB内部接口，合并多个SST文件到目标层
     rocksdb::Status s = task->db->CompactFiles(
         task->compact_options,
         task->input_file_names,
         task->output_level);
+    
+    // auto end_time = std::chrono::steady_clock::now();
+    // auto elapsed_us = std::chrono::duration_cast<std::chrono::microseconds>(
+    //     end_time - start_time).count();
+    
+    // ✅ 通过task->compactor访问实例成员
+    Compactor* compactor = static_cast<Compactor*>(task->compactor);
+    
+    if(s.ok())
+    {
+        // ✅ 更新统计信息
+        compactor->stats.total_compaction_count++;
+        compactor->stats.epoch_compaction_count++;
 
-    if (!s.ok() && !s.IsIOError() && task->retry_on_fail && !s.IsInvalidArgument())
+        compactor->stats.total_input_files += task->input_file_names.size();
+        compactor->stats.epoch_input_files += task->input_file_names.size();
+
+        // compactor->stats.total_compaction_time_us += elapsed_us;
+        // compactor->stats.epoch_compaction_time_us += elapsed_us;
+
+        // 记录每层统计❓
+        if (task->output_level < CompactionStats::MAX_LEVELS) {
+            compactor->stats.compaction_count_per_level[task->output_level]++;
+        }
+
+        // 级联 Compaction 检查
+        int largest_level_idx = compactor->largest_occupied_level(task->db);
+        for (int level_idx = task->output_level; level_idx <= largest_level_idx; level_idx++)
+        {
+            CompactionTask *cascade_task = compactor->PickCompaction(
+                task->db, 
+                task->column_family_name, 
+                level_idx);
+                
+            if (cascade_task != nullptr)
+            {
+                spdlog::debug("Cascade compaction triggered: L{} -> L{}",
+                              level_idx, cascade_task->output_level);
+                compactor->ScheduleCompaction(cascade_task);
+            }
+        }
+
+    }
+    else if (!s.ok() && !s.IsIOError() && task->retry_on_fail && !s.IsInvalidArgument())
     {
         // If a compaction task with its retry_on_fail=true failed,
         // try to schedule another compaction in case the reason
@@ -291,16 +342,25 @@ void Compactor::CompactFiles(void *arg)
             task->db,
             task->column_family_name,
             task->origin_level_id);
-
-        new_task->is_a_retry = true;
-        task->compactor->ScheduleCompaction(new_task);
+        
+        if (new_task) 
+        {
+            new_task->is_a_retry = true;
+            compactor->ScheduleCompaction(new_task);
+        }
+        // new_task->is_a_retry = true;
+        // task->compactor->ScheduleCompaction(new_task);
         return;
+    }
+    else if (!s.ok())
+    {
+        spdlog::error("CompactFiles failed: L{} -> L{}, status: {}",
+                      task->origin_level_id, task->output_level, s.ToString());
     }
 
     spdlog::trace("CompactFiles L{} -> L{} finished | Status: {}",
                   task->origin_level_id, task->output_level, s.ToString());
-    ((Compactor *)task->compactor)
-        ->compactions_left_count--;
+    ((Compactor *)task->compactor)->compactions_left_count--;
     return;
 }
 
@@ -308,12 +368,13 @@ void Compactor::ScheduleCompaction(CompactionTask *task)
 {
     if (!task->is_a_retry)
     {
-        this->compactions_left_count++;
+        this->compactions_left_count++; // 增加"待完成 Compaction"计数
     }
-    this->rocksdb_opt.env->Schedule(&Compactor::CompactFiles, task);//使用 RocksDB 的 Env 调度到后台线程池
+    this->rocksdb_opt.env->Schedule(&Compactor::CompactFiles, task);//使用 RocksDB的Env调度到后台线程池
     return;
 }
 
+// 🌟此处的B是指Memtable大小
 size_t Compactor::estimate_levels(size_t N, double T, size_t E, size_t B)
 {
     if ((N * E) < B)
@@ -327,6 +388,7 @@ size_t Compactor::estimate_levels(size_t N, double T, size_t E, size_t B)
     return estimated_levels;
 }
 
+// (未使用)
 size_t Compactor::calculate_full_tree(double T, size_t E, size_t B, size_t L)
 {
     int full_tree_size = 0;
@@ -348,7 +410,7 @@ void Compactor::updateT(int T)
     return;
 }
 
-//运行时更新压缩阈值参数
+// buffer size表示的是Memtable的大小
 void Compactor::updateM(size_t M)
 {
     this->meta_data_mutex.lock();

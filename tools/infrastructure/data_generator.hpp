@@ -65,6 +65,8 @@ public:
     std::pair<std::string, std::string> gen_kv_pair(size_t kv_size);
 
     std::pair<std::string, std::string> gen_new_kv_pair(size_t kv_size);
+
+    std::pair<std::string, std::string> gen_existing_kv_pair(size_t kv_size);
 };
 
 

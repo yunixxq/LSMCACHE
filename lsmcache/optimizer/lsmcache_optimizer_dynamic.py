@@ -243,7 +243,7 @@ if __name__ == "__main__":
     if len(sys.argv) > 1:
         config_yaml_path = sys.argv[1]
     else:
-        config_yaml_path = os.path.join("lrkv/config/config.yaml")
+        config_yaml_path = os.path.join("lsmcache/config/config_lsm_cache.yaml")
 
     with open(config_yaml_path) as f:
         config = yaml.load(f, Loader=yaml.FullLoader)

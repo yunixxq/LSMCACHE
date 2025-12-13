@@ -51,6 +51,17 @@ std::pair<std::string, std::string> DataGenerator::gen_new_kv_pair(size_t kv_siz
     return std::pair<std::string, std::string>(key, value);
 }
 
+// ✅xxq新增，生成符合Zipfian分布规律的已存在key的kv对
+std::pair<std::string, std::string> DataGenerator::gen_existing_kv_pair(size_t kv_size)
+{
+    std::string key = this->gen_existing_key();
+    assert(key.size() < kv_size && "Requires larger key size");
+    size_t value_size = kv_size - key.size();
+    std::string value = this->gen_val(value_size);
+
+    return std::pair<std::string, std::string>(key, value);
+}
+
 std::string RandomGenerator::gen_key()
 {
     return std::to_string(this->dist(this->engine));
@@ -135,30 +146,35 @@ std::string KeyFileGenerator::gen_existing_key()
     return std::to_string(this->existing_keys[this->dist_existing->gen(this->engine) - 1]);
 }
 
+// ✅重点关注YCSB的实现 num_keys = N; mode = uniform / zipfian
 YCSBGenerator::YCSBGenerator(int num_keys, std::string mode, double zipfian_skewness)
 {
+    // 1. 生成key列表
     std::vector<int> v;
     for (int i = 0; i < num_keys; ++i)
     {
         v.push_back(i);
     }
-    // std::shuffle(v.begin(), v.end(), std::default_random_engine(0));
-    this->existing_keys = v;
+    this->existing_keys = v; // 初始化 existing_keys 为 [0, 1, 2, ..., N-1]
     this->keys = v;
-    // this->engine = std::mt19937();
     this->key_gen = this->existing_keys.begin();
+
+    // 2. 根据mode创建分布生成器
     if (mode == "uniform")
     {
-        this->dist_existing = new UniformGenerator(0, num_keys);
-        this->dist_new = new UniformGenerator(0, num_keys);
+        // 均匀分布：每个key被选中的概率相等(未使用)
+        this->dist_existing = new UniformGenerator(0, num_keys - 1);
+        this->dist_new = new UniformGenerator(0, num_keys - 1);  // 实际上并未使用
     }
     else
     {
-        this->dist_existing = new ScrambledZipfianGenerator(num_keys, zipfian_skewness);
-        this->dist_new = new ScrambledZipfianGenerator(num_keys, zipfian_skewness);
+        // ✅(打乱版)Zipfian分布：某些热点key被选中的概率更高
+        this->dist_existing = new ScrambledZipfianGenerator(0, num_keys-1, zipfian_skewness);
+        this->dist_new = new ScrambledZipfianGenerator(0, num_keys-1, zipfian_skewness); // 实际上并未使用
     }
 }
 
+// "0", "1", ..., "N-1"(循环)
 std::string YCSBGenerator::gen_key()
 {
     std::string key = std::to_string(*this->key_gen);
@@ -174,20 +190,18 @@ YCSBGenerator::~YCSBGenerator()
     delete this->dist_existing;
 }
 
+// ✅生成空点查询的key
 std::string YCSBGenerator::gen_new_dup_key()
 {
-    // std::string key = std::to_string(this->keys[this->dist_new->Next() - 1]);
-    std::string key = std::to_string(this->existing_keys[this->dist_existing->Next() - 1]);
-    int last_char = int(key.at(key.length() - 1));
-    // char A = "A";
-    // spdlog::info(key.substr(0, key.length() - 1) + (char)(last_char + 17));
-    return key.substr(0, key.length() - 1) + (char)(last_char + 17);
+    std::string key = std::to_string(this->existing_keys[this->dist_existing->Next()]);
+    int last_char = int(key.at(key.length() - 1)); // 获取key的最后一个字符的ASCII值
+    return key.substr(0, key.length() - 1) + (char)(last_char + 17); // '0'-'9'加上17后变成'A'-'J'，而existing_key中一定不存在字母
 }
 
+// ✅生成非空点查询的key
 std::string YCSBGenerator::gen_existing_key()
 {
-    std::string key = std::to_string(this->existing_keys[this->dist_existing->Next() - 1]);
-    // spdlog::info(key);
+    std::string key = std::to_string(this->existing_keys[this->dist_existing->Next()]);
     return key;
 }
 

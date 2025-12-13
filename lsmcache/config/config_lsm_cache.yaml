@@ -9,6 +9,7 @@ app:
     DYNAMIC_EXECUTION_PATH: "build/db_runner_dynamic"
     DATABASE_PATH: "/tmp"
     KEY_FILE_PATH: "data/keys.data"
+    LOG_FILE_PATH: "data/log_file.csv"
 
 # 简易快速执行版
 lsm_tree_config: 

@@ -114,7 +114,7 @@ class LevelCost(object):
             self.logger.info(f"{key} : {val}")
             row[f"{key}"] = val
 
-        row["L"] = estimate_level(N, row["mbuf"], row["T"], E) # E(bytes)
+        row["L"] = estimate_level(N, row["mbuf"] / 2, row["T"], E) # E(bytes)
         row["z0"] = z0
         row["z1"] = z1
         row["q"] = q

@@ -18,6 +18,11 @@
 #include "rocksdb/compaction_filter.h"
 #include "tmpdb/compactor.hpp"
 #include "infrastructure/data_generator.hpp"
+#include "tmpdb/performance_monitor.hpp"
+#include "tmpdb/decision_engine.hpp"
+#include "tmpdb/memory_allocator.hpp"
+#include "tmpdb/epoch_logger.hpp"
+
 using namespace ROCKSDB_NAMESPACE;
 
 #define PAGESIZE 4096
@@ -48,9 +53,19 @@ typedef struct environment
     size_t N = 1e6;
     size_t L = 0;
 
-    // 动态参数调整相关变量
-    size_t epoch_size = 100;           // 每个epoch的步数
-    double adjustment_factor = 0.1;    // 调整幅度 (10%)
+    // ===== 动态调参相关配置 =====
+    size_t M = 0;      // ✅总内存预算
+    double initial_alpha = 0.5;          // ✅初始alpha值(CAMAL得到的静态最优alpha)
+    bool enable_dynamic_tuning = false;  // 是否启用动态调参
+    size_t epoch_size = 1000;            // 每个epoch的操作数
+    
+
+    // Decision Engine 阈值配置
+    double cache_hit_rate_low = 0.80;
+    double write_stall_rate_high = 0.05;
+    double compaction_rate_high = 5.0;
+    double alpha_step = 0.05;
+    int stability_window = 3;
 
     int verbose = 0;
     bool destroy_db = true;
@@ -69,9 +84,12 @@ typedef struct environment
     std::string key_log_file;
     bool use_key_log = true;
 
+    // 增加日志文件相关配置
+    std::string epoch_log_file; // 日志文件路径
+    bool enable_epoch_log = false; // 是否启用日志记录
+
 } environment;
 
-// ============================== Step1.命令行参数解析 =====================================
 environment parse_args(int argc, char *argv[])
 {
     using namespace clipp;
@@ -91,6 +109,7 @@ environment parse_args(int argc, char *argv[])
                                           (option("-K", "--runs-number") & number("runs", env.K)) % ("size ratio, [default: " + fmt::format("{:.0f}", env.K) + "]"),
                                           (option("-f", "--file-size") & integer("size", env.file_size)) % ("file size (in bytes), [default: " + to_string(env.file_size) + "]"),
                                           (option("-B", "--buffer-size") & integer("size", env.B)) % ("buffer size (in bytes), [default: " + to_string(env.B) + "]"),
+                                          (option("-M", "--total-memory-size") & integer("size", env.M)) % ("total memory size (in bytes), [default: " + to_string(env.M) + "]"), // ✅xxq新增，总内存预算
                                           (option("-E", "--entry-size") & integer("size", env.E)) % ("entry size (bytes) [default: " + to_string(env.E) + ", min: 32]"),
                                           (option("-b", "--bpe") & number("bits", env.bits_per_element)) % ("bits per entry per bloom filter [default: " + fmt::format("{:.1f}", env.bits_per_element) + "]"),
                                           (option("-c", "--compaction") & value("mode", env.compaction_style)) % "set level or tier compaction",
@@ -108,6 +127,17 @@ environment parse_args(int argc, char *argv[])
                                       (option("--scaling") & number("num", env.scaling)) % ("scaling"),
                                       (option("--cache").set(env.use_cache, true) & number("cap", env.cache_cap)) % "use block cache",
                                       (option("--key-log-file").set(env.use_key_log, true) & value("file", env.key_log_file)) % "use keylog to record each key"));
+    // ===== ✅新增：动态调参选项 =====
+    auto tuning_opt = ("dynamic tuning options:" % ((option("--enable-tuning").set(env.enable_dynamic_tuning, true)) % "enable dynamic memory tuning",
+                                                    (option("--epoch-size") & integer("num", env.epoch_size)) % ("operations per epoch [default: " + to_string(env.epoch_size) + "]"),
+                                                    (option("--initial-alpha") & number("alpha", env.initial_alpha)) % ("initial alpha value [default: " + fmt::format("{:.2f}", env.initial_alpha) + "]"),
+                                                    (option("--hit-rate-low") & number("rate", env.cache_hit_rate_low)) % ("cache hit rate low threshold [default: " + fmt::format("{:.2f}", env.cache_hit_rate_low) + "]"),
+                                                    (option("--stall-rate-high") & number("rate", env.write_stall_rate_high)) % ("write stall rate high threshold [default: " + fmt::format("{:.2f}", env.write_stall_rate_high) + "]"),
+                                                    (option("--compaction-rate-high") & number("rate", env.compaction_rate_high)) % ("compaction rate high threshold [default: " + fmt::format("{:.1f}", env.compaction_rate_high) + "]"),
+                                                    (option("--alpha-step") & number("step", env.alpha_step)) % ("alpha adjustment step [default: " + fmt::format("{:.2f}", env.alpha_step) + "]"),
+                                                    (option("--stability-window") & integer("window", env.stability_window)) % ("stability window size [default: " + to_string(env.stability_window) + "]"),
+                                                    (option("--enable-epoch-log").set(env.enable_epoch_log, true)) % "enable epoch logging",
+                                                    (option("--epoch-log-file") & value("file", env.epoch_log_file)) % "epoch log file path"));
 
     auto minor_opt = ("minor options:" % ((option("--max_rocksdb_level") & integer("num", env.max_rocksdb_levels)) % ("limits the maximum levels rocksdb has [default: " + to_string(env.max_rocksdb_levels) + "]"),
                                           (option("--parallelism") & integer("num", env.parallelism)) % ("parallelism for writing to db [default: " + to_string(env.parallelism) + "]"),
@@ -116,6 +146,7 @@ environment parse_args(int argc, char *argv[])
     auto cli = (general_opt,
                 build_opt,
                 run_opt,
+                tuning_opt, //✅新增
                 minor_opt);
 
     if (!parse(argc, argv, cli))
@@ -159,10 +190,103 @@ void print_db_status(rocksdb::DB *db)
     }
 }
 
+// 新增函数
+void wait_for_compactions(rocksdb::DB *db, tmpdb::Compactor *compactor)
+{
+    uint64_t num_running_flushes, num_pending_flushes;
+    
+    while (true)
+    {
+        db->GetIntProperty(DB::Properties::kNumRunningFlushes, &num_running_flushes);
+        db->GetIntProperty(DB::Properties::kMemTableFlushPending, &num_pending_flushes);
+        if (num_running_flushes == 0 && num_pending_flushes == 0)
+            break;
+        // std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    
+    while (compactor->compactions_left_count > 0)
+        ;
+    
+    while (compactor->requires_compaction(db))
+    {
+        while (compactor->compactions_left_count > 0)
+            ;
+    }
+}
+
+// 新增函数：打印最终统计信息
+void print_final_statistics(rocksdb::DB *db, 
+                            rocksdb::Options &rocksdb_opt,
+                            tmpdb::Compactor *compactor,
+                            std::chrono::milliseconds latency)
+{
+    std::map<std::string, uint64_t> stats;
+    rocksdb_opt.statistics->getTickerMap(&stats);
+    
+    // 获取每层文件分布
+    rocksdb::ColumnFamilyMetaData cf_meta;
+    db->GetColumnFamilyMetaData(&cf_meta);
+    
+    std::string files_per_level = "[";
+    std::string size_per_level = "[";
+    for (auto &level : cf_meta.levels)
+    {
+        files_per_level += std::to_string(level.files.size()) + ", ";
+        size_per_level += std::to_string(level.size) + ", ";
+    }
+    files_per_level = files_per_level.substr(0, files_per_level.size() - 2) + "]";
+    size_per_level = size_per_level.substr(0, size_per_level.size() - 2) + "]";
+    
+    spdlog::info("=== Final Statistics ===");
+    spdlog::info("files_per_level : {}", files_per_level);
+    spdlog::info("size_per_level : {}", size_per_level);
+    
+    spdlog::info("(l0, l1, l2plus) : ({}, {}, {})",
+                 stats["rocksdb.l0.hit"],
+                 stats["rocksdb.l1.hit"],
+                 stats["rocksdb.l2andup.hit"]);
+    
+    spdlog::info("(bf_true_neg, bf_pos, bf_true_pos) : ({}, {}, {})",
+                 stats["rocksdb.bloom.filter.useful"],
+                 stats["rocksdb.bloom.filter.full.positive"],
+                 stats["rocksdb.bloom.filter.full.true.positive"]);
+    
+    spdlog::info("(bytes_written, compact_read, compact_write, flush_write) : ({}, {}, {}, {})",
+                 stats["rocksdb.bytes.written"],
+                 stats["rocksdb.compact.read.bytes"],
+                 stats["rocksdb.compact.write.bytes"],
+                 stats["rocksdb.flush.write.bytes"]);
+
+    spdlog::info("(total_read, estimate_read) : ({}, {})",
+                stats["rocksdb.read.amp.total.read.bytes"],
+                stats["rocksdb.read.amp.estimate.useful.bytes"]);
+
+    spdlog::info("(total_latency) : ({})", latency.count());
+
+    // 命中率相关
+    double cache_hit_rate = stats["rocksdb.block.cache.miss"] == 0 ? 0 : double(stats["rocksdb.block.cache.hit"]) / double(stats["rocksdb.block.cache.hit"] + stats["rocksdb.block.cache.miss"]);
+    if (cache_hit_rate < 1e-3)
+        spdlog::info("(cache_hit_rate) : ({})", 0.0);
+    else
+        spdlog::info("(cache_hit_rate) : ({})", cache_hit_rate);
+    spdlog::info("(cache_hit) : ({})", stats["rocksdb.block.cache.hit"]);
+    spdlog::info("(cache_miss) : ({})", stats["rocksdb.block.cache.miss"]);
+
+
+    // Compactor 统计
+    spdlog::info("=== Compactor Statistics ===");
+    spdlog::info("total_flush_count: {}", compactor->stats.total_flush_count.load());
+    spdlog::info("total_compaction_count: {}", compactor->stats.total_compaction_count.load());
+    spdlog::info("total_compaction_input_files: {}", compactor->stats.total_input_files.load());
+    spdlog::info("total_compaction_read_bytes: {}", compactor->stats.total_compaction_read_bytes.load());
+    spdlog::info("total_compaction_write_bytes: {}", compactor->stats.total_compaction_write_bytes.load());
+}
+
 int main(int argc, char *argv[])
 {
-    // ============================== Step2.初始化RocksDB =====================================
+    // ==================== Step 1: 初始化 ====================
     spdlog::set_pattern("[%T.%e]%^[%l]%$ %v");
+
     environment env = parse_args(argc, argv);
 
     if (env.verbose == 1)
@@ -186,6 +310,7 @@ int main(int argc, char *argv[])
         rocksdb::DestroyDB(env.db_path, rocksdb::Options());
     }
 
+    // ==================== Step 2: 配置 RocksDB ====================
     spdlog::info("Building DB: {}", env.db_path);
     rocksdb::Options rocksdb_opt; // 设置options
 
@@ -197,32 +322,39 @@ int main(int argc, char *argv[])
     rocksdb_opt.use_direct_reads = true;
     rocksdb_opt.use_direct_io_for_flush_and_compaction = true;
     rocksdb_opt.target_file_size_base = env.scaling * env.file_size;
+
+    // 禁用 RocksDB 原生 Compaction
     rocksdb_opt.compaction_style = rocksdb::kCompactionStyleNone;
     rocksdb_opt.disable_auto_compactions = true;
-    // rocksdb_opt.max_background_jobs = 1;
     rocksdb_opt.write_buffer_size = env.B / 2;
+    rocksdb_opt.max_write_buffer_number = 2; // MemTable数量 默认也是2
 
+    // ==================== Step 3: 配置自定义 Compactor ====================
     tmpdb::Compactor *compactor = nullptr; //配置自定义的Compactor(CAMAL自行模拟)
     tmpdb::CompactorOptions compactor_opt;
     compactor_opt.size_ratio = env.T;
-    compactor_opt.buffer_size = env.B;
+    compactor_opt.buffer_size = env.B / 2;
     compactor_opt.entry_size = env.E;
     compactor_opt.bits_per_element = env.bits_per_element;
     compactor_opt.num_entries = env.N;
+
     if (env.compaction_style == "level")
         compactor_opt.K = 1;
     else if (env.compaction_style == "tier")
         compactor_opt.K = env.T;
     else
         compactor_opt.K = env.K;
-    compactor_opt.levels = tmpdb::Compactor::estimate_levels(env.N, env.T, env.E, env.B) * compactor_opt.K + 1;
+
+    compactor_opt.levels = tmpdb::Compactor::estimate_levels(env.N, env.T, env.E, env.B / 2) * compactor_opt.K + 1;
     rocksdb_opt.num_levels = compactor_opt.levels + 1;
+
     compactor = new tmpdb::Compactor(compactor_opt, rocksdb_opt);
-    rocksdb_opt.listeners.emplace_back(compactor); //加入自定义compactor
+    rocksdb_opt.listeners.emplace_back(compactor);
 
+    // ==================== Step 4: 配置 Block Cache ====================
     rocksdb::BlockBasedTableOptions table_options;
-
     table_options.read_amp_bytes_per_bit = 32; // 启用读放大统计功能
+
     // 配置Monkey Bloom filter(在不同的level调整bpe)
     table_options.filter_policy.reset(
         rocksdb::NewMonkeyFilterPolicy(
@@ -230,7 +362,7 @@ int main(int argc, char *argv[])
             compactor_opt.size_ratio,
             compactor_opt.levels));
     
-    std::shared_ptr<Cache> block_cache;
+    std::shared_ptr<Cache> block_cache = nullptr;
     // 配置Block Cache
     if (env.cache_cap == 0)
         table_options.no_block_cache = true;
@@ -242,6 +374,8 @@ int main(int argc, char *argv[])
         rocksdb::NewBlockBasedTableFactory(table_options));
 
     rocksdb_opt.statistics = rocksdb::CreateDBStatistics();
+
+    // ==================== Step 5: 打开数据库 ====================
     rocksdb::DB *db = nullptr;
     rocksdb::Status status = rocksdb::DB::Open(rocksdb_opt, env.db_path, &db);
     if (!status.ok())
@@ -252,101 +386,147 @@ int main(int argc, char *argv[])
         exit(EXIT_FAILURE);
     }
 
-    // ============================== Step3.初始化数据 =====================================
-    std::map<std::string, uint64_t> stats;
-    KeyLog *key_log = new KeyLog(env.key_log_file);
-    uint64_t num_running_flushes, num_pending_flushes;
+    // ==================== Step 6: 初始化动态调参组件 ====================
+    tmpdb::PerformanceMonitor* perf_monitor = nullptr;
+    tmpdb::DecisionEngine* decision_engine = nullptr;
+    tmpdb::MemoryAllocator* memory_allocator = nullptr;
+    tmpdb::EpochLogger* epoch_logger = nullptr;
+
+    if (env.enable_dynamic_tuning)
+    {
+        // 检查必要条件
+        // 实际在我们的执行过程中enable_dynamic_tuning=true时二者均不会为0
+        if (env.M == 0) {
+            spdlog::error("Total memory budget (-M) must be specified for dynamic tuning");
+            exit(EXIT_FAILURE);
+        }
+        if (block_cache == nullptr) {
+            spdlog::error("Block cache must be enabled for dynamic tuning");
+            exit(EXIT_FAILURE);
+        }
+
+        spdlog::info("=== Dynamic Tuning Enabled ===");
+        
+        // 输出配置信息
+        spdlog::info("Total memory budget: {} MB", env.M >> 20); // 单位MB
+        spdlog::info("Initial alpha: {:.2f}", env.initial_alpha);
+        spdlog::info("Epoch size: {} operations", env.epoch_size);
+        
+        // 创建 Performance Monitor
+        perf_monitor = new tmpdb::PerformanceMonitor(
+            db, rocksdb_opt.statistics.get(), compactor);
+        
+        // 创建 Decision Engine
+        tmpdb::ThresholdConfig threshold_config;
+        threshold_config.cache_hit_rate_low = env.cache_hit_rate_low;
+        threshold_config.write_stall_rate_high = env.write_stall_rate_high;
+        threshold_config.compaction_rate_high = env.compaction_rate_high;
+        threshold_config.alpha_step = env.alpha_step;
+        threshold_config.stability_window = env.stability_window;
+
+        decision_engine = new tmpdb::DecisionEngine(
+            env.initial_alpha, threshold_config);
+        
+        // 创建 Memory Allocator
+        memory_allocator = new tmpdb::MemoryAllocator(
+            db, block_cache, compactor,
+            env.M, env.initial_alpha);
+        
+        memory_allocator->print_allocation();
+
+        // 创建 Epoch Logger（如果启用）
+        if (env.enable_epoch_log)
+        {
+            spdlog::info("Using default epoch log file: {}", env.epoch_log_file);
+            epoch_logger = new tmpdb::EpochLogger();
+            if (!epoch_logger->open(env.epoch_log_file))
+            {
+                spdlog::error("Failed to create epoch log file, continuing without logging");
+                delete epoch_logger;
+                epoch_logger = nullptr;
+            }
+        }
+
+    }
+
+    // ==================== Step 7: 初始化数据 ====================
+    spdlog::info("Initializing data with {} entries...", env.N);
+
     rocksdb::WriteOptions write_opt;
     write_opt.low_pri = true;
-    // write_opt.disableWAL = false;
     write_opt.disableWAL = true;
-    // 确保启用读统计信息
-    // rocksdb::ReadOptions read_options;
-    // read_options.read_tier = rocksdb::ReadTier::kReadAllTier;
-    // read_options.fill_cache = true;
 
+    // 这一部分在构造YCSB时的mode和skewness是随意设置的
+    // 因为gen_kv_pair递归调用的gen_key并未使用dist_new，而是顺序生成"0", "1", ..., "N-1"
     DataGenerator *data_gen = new YCSBGenerator(env.N, "uniform", 0.0);
     std::pair<std::string, std::string> key_value;
+
     auto write_time_start = std::chrono::high_resolution_clock::now();
     for (size_t entry_num = 0; entry_num < env.N; entry_num += 1)
     {
-        key_value = data_gen->gen_kv_pair(env.E);
+        key_value = data_gen->gen_kv_pair(env.E); // 生成由[0, N-1]N个key组成的kv对
         db->Put(write_opt, key_value.first, key_value.second);
+
+        // 打印生成的kv对进行验证(前10个和后10个)
+        // if (entry_num < 10 || entry_num >= env.N - 10)
+        // {
+        //     spdlog::info("Insert[{}]: key='{}', value_size={}", 
+        //                 entry_num, key_value.first, key_value.second.size());
+        // }
     }
 
-    // 等待所有的flush/Compaction完成-确保数据库在进入查询前处于稳定状态
-    spdlog::info("Waiting for all compactions to finish before running");
-    rocksdb::FlushOptions flush_opt;
-    {
-        while (true)
-        {
-            // 正在进行flush的Memtable数量
-            db->GetIntProperty(DB::Properties::kNumRunningFlushes,
-                               &num_running_flushes);
-            // 标记为待刷写的Memtable数量
-            db->GetIntProperty(DB::Properties::kMemTableFlushPending,
-                               &num_pending_flushes);
-            if (num_running_flushes == 0 && num_pending_flushes == 0)
-                break;
-        }
-        while (compactor->compactions_left_count > 0) //检查是否有尚未完成的Compaction
-            ;
-    }
-    while (compactor->requires_compaction(db)) //检查当前是否需要执行Compaction操作
-    {
-        while (compactor->compactions_left_count > 0)
-            ;
-    }
+    // 等待初始化完成
+    spdlog::info("Waiting for initial compactions to finish...");
+    wait_for_compactions(db, compactor);
+
     auto write_time_end = std::chrono::high_resolution_clock::now();
     auto write_time = std::chrono::duration_cast<std::chrono::milliseconds>(write_time_end - write_time_start).count();
+    // spdlog::info("Initialization completed in {} ms", write_time);
     spdlog::info("(init_time) : ({})", write_time);
 
-    // 获取每层文件分布
-    rocksdb::ColumnFamilyMetaData cf_meta;
-    db->GetColumnFamilyMetaData(&cf_meta);
+    print_db_status(db);
 
-    std::string run_per_level = "[";
-    for (auto &level : cf_meta.levels)
-    {
-        run_per_level += std::to_string(level.files.size()) + ", ";
-    }
-    run_per_level = run_per_level.substr(0, run_per_level.size() - 2) + "]";
-    spdlog::info("files_per_level_build : {}", run_per_level);
-
-    std::string size_per_level = "[";
-    for (auto &level : cf_meta.levels)
-    {
-        size_per_level += std::to_string(level.size) + ", ";
-    }
-    size_per_level = size_per_level.substr(0, size_per_level.size() - 2) + "]";
-    spdlog::info("size_per_level_build : {}", size_per_level);
-
+    // 重置统计信息
     rocksdb_opt.statistics->Reset();
     rocksdb::get_iostats_context()->Reset();
     rocksdb::get_perf_context()->Reset();
-    std::mt19937 engine;
-    std::uniform_real_distribution<double> dist(0, 1);
+    compactor->stats.reset_epoch();
 
-    // 动态调参的相关变量
-    double prev_hit_rate = 0.0;
-    uint64_t epoch_start_hit = 0;
-    uint64_t epoch_start_miss = 0;
-    size_t current_cache_cap = env.cache_cap;
-    size_t current_buffer = env.B;
-    spdlog::info("Dynamic adjustment enabled: epoch_size={}, adjustment_factor={}", 
-                 env.epoch_size, env.adjustment_factor);
+    // ==================== Step 8: 执行 Workload ====================
+    spdlog::info("=== Starting Workload Execution ===");
+    spdlog::info("Total steps: {}, Epoch size: {}", env.steps, env.epoch_size);
 
-    // ============================== Step4.执行查询(workload执行逻辑) =====================================
     double p[] = {env.empty_reads, env.non_empty_reads, env.range_reads, env.writes};
     double cumprob[] = {p[0], p[0] + p[1], p[0] + p[1] + p[2], 1.0};
+    
     std::string value, key, limit;
+    delete data_gen;
     data_gen = new YCSBGenerator(env.N, env.dist_mode, env.skew);
+
     ReadOptions read_options;
     read_options.total_order_seek = true;
     rocksdb::Iterator *it = db->NewIterator(read_options);
-    auto time_start = std::chrono::high_resolution_clock::now();
+
+    std::mt19937 engine;
+    if (env.seed != 0)
+    {
+        engine.seed(env.seed); //使用用户指定的种子
+    }
+    else
+    {
+        engine.seed(std::time(nullptr));
+    }
+    std::uniform_real_distribution<double> dist(0, 1);
+
     env.sel = PAGESIZE / env.E;
 
+    // 统计变量
+    size_t epoch_count = 0;
+    size_t total_adjustments = 0;
+
+    auto time_start = std::chrono::high_resolution_clock::now();
+    
+    // ==================== 主循环 ====================
     for (size_t i = 0; i < env.steps; i++)
     {
         double r = dist(engine); // 生成一个0-1的随机数
@@ -377,7 +557,9 @@ int main(int argc, char *argv[])
         {
             key = data_gen->gen_existing_key();
             limit = std::to_string(stoi(key) + 1 + env.sel);
-            for (it->Seek(rocksdb::Slice(key)); it->Valid() && it->key().ToString() < limit; it->Next())
+            for (it->Seek(rocksdb::Slice(key)); 
+                 it->Valid() && it->key().ToString() < limit; 
+                 it->Next())
             {
                 value = it->value().ToString();
             }
@@ -385,105 +567,111 @@ int main(int argc, char *argv[])
         }
         case 3:
         {
-            if (static_cast<double>(rand()) / RAND_MAX > env.dels)
-            {
-                key_value = data_gen->gen_new_kv_pair(compactor_opt.entry_size);
-                db->Put(write_opt, key_value.first, key_value.second);
-            }
-            else
-            {
-                key = data_gen->gen_existing_key();
-                db->Delete(write_opt, key);
-            }
+            key_value = data_gen->gen_existing_kv_pair(env.E);
+            db->Put(write_opt, key_value.first, key_value.second);
             break;
         }
         default:
             break;
         }
+
+        // ===== 动态调参：每个 epoch 结束时执行 =====
+        if (env.enable_dynamic_tuning && ((i + 1) % env.epoch_size == 0))
+        {
+            epoch_count++;
+            
+            // Step 1: 采集性能指标
+            tmpdb::PerformanceMetrics metrics = perf_monitor->collect();
+            
+            spdlog::info("--- Epoch {} (step {}/{}) ---", epoch_count, i + 1, env.steps);
+            metrics.print();
+            
+            // Step 2: 诊断瓶颈（用于日志记录）
+            spdlog::info("DEBUG: Before diagnose");
+            bool write_bottleneck = decision_engine->is_write_bottleneck(metrics);
+            bool read_bottleneck = decision_engine->is_read_bottleneck(metrics);
+
+            // Step 3: 决策引擎做出决策
+            spdlog::info("DEBUG: Before decide");
+            double alpha_before = decision_engine->get_current_alpha();
+            tmpdb::AdjustmentDecision decision = decision_engine->decide(metrics);
+            
+            // Step 4: 如果需要调整，执行调整
+            spdlog::info("DEBUG: Before apply decision");
+            double alpha_after = alpha_before;
+            bool adjustment_applied = false;
+
+            if (decision.action != tmpdb::AdjustmentAction::NO_CHANGE)
+            {
+                spdlog::info("DEBUG: Applying adjustment");
+                double new_alpha = decision_engine->apply_decision(decision);
+                
+                // Step 4: 应用新的内存分配
+                if (memory_allocator->adjust_allocation(new_alpha))
+                {
+                    total_adjustments++;
+                    adjustment_applied = true;
+                    alpha_after = memory_allocator->get_current_alpha();
+                    memory_allocator->print_allocation();
+                }
+            }
+            else
+            {   
+                spdlog::debug("No adjustment needed: {}", decision.reason);
+            }
+
+            // 将epoch的相关信息记录到CSV文件中
+            spdlog::info("DEBUG: Before log_epoch"); 
+            if (epoch_logger && epoch_logger->is_open())
+            {
+                epoch_logger->log_epoch(
+                    epoch_count,                    // epoch 编号
+                    i + 1,                          // 当前步数
+                    metrics,                        // 性能指标
+                    write_bottleneck,               // 写瓶颈
+                    read_bottleneck,                // 读瓶颈
+                    decision.action,                // 调整动作
+                    decision.reason,                // 调整原因
+                    alpha_before,                   // 调整前 alpha
+                    alpha_after,                    // 调整后 alpha
+                    adjustment_applied              // 是否应用
+                );
+            }
+            spdlog::info("DEBUG: Epoch {} completed", epoch_count);
+        }
     }
     delete it;
 
-    // 确保所有的后台操作(flush + compaction)完成
-    while (true)
-    {
-        db->GetIntProperty(DB::Properties::kNumRunningFlushes,
-                            &num_running_flushes);
-        db->GetIntProperty(DB::Properties::kMemTableFlushPending,
-                            &num_pending_flushes);
-        if (num_running_flushes == 0 && num_pending_flushes == 0)
-            break;
-    }
-    while (compactor->compactions_left_count > 0)
-        ;
-    while (compactor->requires_compaction(db))
-    {
-        while (compactor->compactions_left_count > 0)
-            ;
-    }
+    // ==================== Step 9: 等待后台操作完成 ====================
+    spdlog::info("Waiting for background operations to complete...");
+    wait_for_compactions(db, compactor);
 
     auto time_end = std::chrono::high_resolution_clock::now();
-    auto latency = std::chrono::duration_cast<std::chrono::milliseconds>(time_end - time_start).count(); // 单位是毫秒
-    db->GetColumnFamilyMetaData(&cf_meta);
-    run_per_level = "[";
-    for (auto &level : cf_meta.levels)
-    {
-        run_per_level += std::to_string(level.files.size()) + ", ";
-    }
-    run_per_level = run_per_level.substr(0, run_per_level.size() - 2) + "]";
-    spdlog::info("files_per_level : {}", run_per_level);
-
-    stats.clear();
-    rocksdb_opt.statistics->getTickerMap(&stats);
-
-    spdlog::info("(l0, l1, l2plus) : ({}, {}, {})",
-                 stats["rocksdb.l0.hit"],
-                 stats["rocksdb.l1.hit"],
-                 stats["rocksdb.l2andup.hit"]);
-    spdlog::info("(bf_true_neg, bf_pos, bf_true_pos) : ({}, {}, {})",
-                 stats["rocksdb.bloom.filter.useful"],
-                 stats["rocksdb.bloom.filter.full.positive"],
-                 stats["rocksdb.bloom.filter.full.true.positive"]);
-    spdlog::info("(bytes_written, compact_read, compact_write, flush_write) : ({}, {}, {}, {})",
-                 stats["rocksdb.bytes.written"],
-                 stats["rocksdb.compact.read.bytes"],
-                 stats["rocksdb.compact.write.bytes"],
-                 stats["rocksdb.flush.write.bytes"]);
-    spdlog::info("(total_read, estimate_read) : ({}, {})",
-                 stats["rocksdb.read.amp.total.read.bytes"],
-                 stats["rocksdb.read.amp.estimate.useful.bytes"]);
-
-    spdlog::info("(total_latency) : ({})", latency);
+    auto total_latency = std::chrono::duration_cast<std::chrono::milliseconds>(time_end - time_start);
     
-    // 命中率相关
-    double cache_hit_rate = stats["rocksdb.block.cache.miss"] == 0 ? 0 : double(stats["rocksdb.block.cache.hit"]) / double(stats["rocksdb.block.cache.hit"] + stats["rocksdb.block.cache.miss"]);
-    if (cache_hit_rate < 1e-3)
-        spdlog::info("(cache_hit_rate) : ({})", 0.0);
-    else
-        spdlog::info("(cache_hit_rate) : ({})", cache_hit_rate);
-    spdlog::info("(cache_hit) : ({})", stats["rocksdb.block.cache.hit"]);
-    spdlog::info("(cache_miss) : ({})", stats["rocksdb.block.cache.miss"]);
+    // ==================== Step 10: 打印最终统计 ====================
+    print_final_statistics(db, rocksdb_opt, compactor, total_latency);
 
-    db->GetColumnFamilyMetaData(&cf_meta);
-
-    run_per_level = "[";
-    for (auto &level : cf_meta.levels)
+    if (env.enable_dynamic_tuning) // 动态调整相关信息
     {
-        run_per_level += std::to_string(level.files.size()) + ", ";
+        spdlog::info("=== Dynamic Tuning Summary ===");
+        spdlog::info("Total epochs: {}", epoch_count);
+        spdlog::info("Total adjustments: {}", total_adjustments);
+        spdlog::info("Final alpha: {:.2f}", decision_engine->get_current_alpha());
+        memory_allocator->print_allocation();
     }
-    run_per_level = run_per_level.substr(0, run_per_level.size() - 2) + "]";
-    spdlog::info("files_per_level : {}", run_per_level);
-
-    size_per_level = "[";
-    for (auto &level : cf_meta.levels)
-    {
-        size_per_level += std::to_string(level.size) + ", ";
-    }
-    size_per_level = size_per_level.substr(0, size_per_level.size() - 2) + "]";
-    spdlog::info("size_per_level : {}", size_per_level);
-
+    
+    // ==================== Step 11: 清理 ====================
     db->Close();
     delete db;
-    delete key_log;
+    //delete key_log;
     delete data_gen;
+
+    delete perf_monitor;
+    delete decision_engine;
+    delete memory_allocator;
+    delete epoch_logger;
+
+    spdlog::info("=== Execution Completed ===");
     return EXIT_SUCCESS;
 }
