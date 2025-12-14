@@ -137,7 +137,7 @@ environment parse_args(int argc, char *argv[])
                                                     (option("--alpha-step") & number("step", env.alpha_step)) % ("alpha adjustment step [default: " + fmt::format("{:.2f}", env.alpha_step) + "]"),
                                                     (option("--stability-window") & integer("window", env.stability_window)) % ("stability window size [default: " + to_string(env.stability_window) + "]"),
                                                     (option("--enable-epoch-log").set(env.enable_epoch_log, true)) % "enable epoch logging",
-                                                    (option("--epoch-log-file") & value("file", env.epoch_log_file)) % "epoch log file path"));
+                                                    // (option("--epoch-log-file") & value("file", env.epoch_log_file)) % "epoch log file path"));
 
     auto minor_opt = ("minor options:" % ((option("--max_rocksdb_level") & integer("num", env.max_rocksdb_levels)) % ("limits the maximum levels rocksdb has [default: " + to_string(env.max_rocksdb_levels) + "]"),
                                           (option("--parallelism") & integer("num", env.parallelism)) % ("parallelism for writing to db [default: " + to_string(env.parallelism) + "]"),
@@ -437,6 +437,7 @@ int main(int argc, char *argv[])
         // 创建 Epoch Logger（如果启用）
         if (env.enable_epoch_log)
         {
+            env.epoch_log_file = "data/log_file.csv";
             spdlog::info("Using default epoch log file: {}", env.epoch_log_file);
             epoch_logger = new tmpdb::EpochLogger();
             if (!epoch_logger->open(env.epoch_log_file))

@@ -100,7 +100,7 @@ def get_cache(current_T, current_h, current_ratio, alpha, c, z0, z1, q, w, M, N)
     l = estimate_level(N, buffer / 2, current_T)
     return [alpha, c, z0, z1, q, w, current_T, l, fpr, cache_cap, buffer]
 
-
+# ✅ 各个参数组合对应的特征向量
 def get_cost_uniform(
     # is_leveling_policy,
     current_T,
@@ -115,10 +115,11 @@ def get_cost_uniform(
     N,
 ):
     fpr = estimate_fpr(current_h)
-    buffer = current_ratio * (M - current_h * N) / 8 # write buffer in bytes
-    cache_cap = (1 - current_ratio) * (M - current_h * N) / 8 # cache capacity in bytes
-    l = estimate_level(N, buffer / 2, current_T, E)
-    return [z0, z1, q, w, current_T, l, fpr, cache_cap, buffer]
+    Mbuf = current_ratio * M / 8 # total write buffer in bytes
+    Mmemtable = Mbuf / 2 # single write buffer(Memtable) size in bytes
+    Mcache = (1 - current_ratio) * M / 8 # cache capacity in bytes  
+    l = estimate_level(N, Mmemtable, current_T, E)
+    return [z0, z1, q, w, current_T, l, fpr, Mcache, Mbuf]
 
 
 def get_cost(

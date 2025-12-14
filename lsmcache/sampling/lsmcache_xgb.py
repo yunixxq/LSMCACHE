@@ -7,7 +7,6 @@ import copy
 import sys
 import os
 import yaml
-from sklearn.model_selection import KFold
 
 sys.path.append("./lsmcache")
 from lsmcache_runner import Runner
@@ -36,12 +35,12 @@ workloads = [
 config_yaml_path = os.path.join("lsmcache/config/config_lsm_cache.yaml")
 with open(config_yaml_path) as f:
     config = yaml.load(f, Loader=yaml.FullLoader)
-scaling = config["lsm_tree_config"]["scaling"]
+
 E = config["lsm_tree_config"]["E"] / 8 # bits/entry -> Bytes/entry
-Q = int(config["lsm_tree_config"]["Q"] * scaling)
+Q = int(config["lsm_tree_config"]["Q"])
 B = int(4096 / E) # entries per page
-M = config["lsm_tree_config"]["M"] * scaling # total memory in bits
-N = config["lsm_tree_config"]["N"] * scaling # total entries
+M = config["lsm_tree_config"]["M"] # total memory in bits
+N = config["lsm_tree_config"]["N"] # total entries
 sel = config["lsm_tree_config"]["s"]
 
 class LevelCost(object):
@@ -94,8 +93,8 @@ class LevelCost(object):
             row["h"], # bpe
             row["T"], # size ratio
             row["N"], # n
-            row["E"], # 直接copy的config，因此是bits/entry
-            row["M"], # 直接copy的config，不需重新计算
+            row["E"], # bits/entry
+            row["M"], # bits/entry
             row["mbuf"],
             z0,
             z1,
@@ -154,8 +153,8 @@ class LevelCost(object):
         df = []
         df2 = []
         key_path = "key_log_al_level_cost"
-        # if not os.path.exists(key_path):
-        #     os.makedirs(key_path)
+        if not os.path.exists(key_path):
+            os.makedirs(key_path)
         step = 0
         for workload in workloads:
             z0, z1, q, w = workload
@@ -175,25 +174,28 @@ class LevelCost(object):
                 T_list = [temp]
                 T_list = weight_sampling(t, 0, self.samples, T_list)
             print(T_list)
+
             z0, z1, q, w = workload
             ratio = 1.0 # cache=0
             dist = "zipf"
             skew = 0.8
             bpe = 8
-            buffer = ratio * (M - bpe * N) / 8 # bytes
-            cache_cap = 0
-            for size_ratio in T_list:
+            Mbuf = ratio * M / 8 # bytes
+            Mcache = 0
+            # buffer = ratio * (M - bpe * N) / 8 # bytes
+            # cache_cap = 0
+            for T in T_list:
                 key_log = key_path + "/{}.dat".format(step)
                 row = self.single_run(
                     workload,
-                    size_ratio,
+                    T,
                     ratio,
                     N,
-                    buffer,
+                    Mbuf,
                     bpe,
                     dist,
                     skew,
-                    cache_cap,
+                    Mcache,
                     Q,
                     key_log,
                 )
@@ -204,7 +206,7 @@ class LevelCost(object):
 
             regr = iter_model(df, "level", E, M, N)
             candidates = traverse_for_T([regr], z0, z1, q, w, E, M, N, n=1)
-            T0 = int((candidates[0][0] + T_list[0]) / 2) # 平均理论最佳T与模型预测最佳T
+            # T0 = int((candidates[0][0] + T_list[0]) / 2) # 平均理论最佳T与模型预测最佳T
             T0 = candidates[0][0] # 模型训练得到的最佳T
 
             # ============ 确定最佳h =============
@@ -223,20 +225,20 @@ class LevelCost(object):
                 h_list = [temp]
                 h_list = weight_sampling(h, 1, self.samples, h_list)
             print(h_list)
+            
             for h in h_list:
-                buffer = ratio * (M - h * N) / 8
-                size_ratio = T0
+                T = T0
                 key_log = key_path + "/{}.dat".format(step)
                 row = self.single_run(
                     workload,
-                    size_ratio,
+                    T,
                     ratio,
                     N,
-                    buffer,
+                    Mbuf, # 不变，因为只有ratio会影响Mbuf
                     h,
                     dist,
                     skew,
-                    cache_cap, # 0
+                    Mcache, # 0
                     Q,
                     key_log,
                 )
@@ -248,26 +250,30 @@ class LevelCost(object):
             # iter model
             regr = iter_model(df, "level", E, M, N)
             candidates = traverse_for_h([regr], z0, z1, q, w, E, M, N, T0=T0, n=1)
-            h0 = int((candidates[0][1] + h_list[0]) / 2) # 平均理论最佳h与模型预测最佳h
+            # h0 = int((candidates[0][1] + h_list[0]) / 2) # 平均理论最佳h与模型预测最佳h
             h0 = candidates[0][1] # 模型训练得到的最佳h
 
             # ============ 确定最佳的ratio(Mb与Mc之间的比例) =============
+            # 注：此阶段 h 已固定为 h0，M 专指分配给 buffer+cache 的内存预算
+            # Bloom Filter 内存不计入此分配
             min_err = 1e9
             for ratio in np.arange(0.1, 0.9, 0.1):  # [0.1,0.9) 8个值
-                buffer = ratio * (M - h0 * N) / 8 # bytes
-                cache_cap = (1 - ratio) * (M - h0 * N) / 8  # bytes
-                size_ratio = T0
+                # buffer = ratio * (M - h0 * N) / 8 # bytes
+                # cache_cap = (1 - ratio) * (M - h0 * N) / 8  # bytes
+                Mbuf = ratio * M / 8 # bytes
+                Mcache = (1 - ratio) * M / 8 # bytes
+                T = T0
                 key_log = key_path + "/{}.dat".format(step)
                 row = self.single_run(
                     workload,
-                    size_ratio,
+                    T,
                     ratio,
                     N,
-                    buffer,
+                    Mbuf,
                     h0,
                     dist,
                     skew,
-                    cache_cap,
+                    Mcache,
                     Q,
                     key_log,
                 )
@@ -282,7 +288,6 @@ class LevelCost(object):
         pd.DataFrame(df).to_csv(self.config["samples_path"]["lsmcache_xgb_final"])
         pd.DataFrame(df2).to_csv(self.config["samples_path"]["lsmcache_hit_xgb_final"])
         self.logger.info(f"Finished xgb level, use {time.time()-start_time}s\n")
-
 
 if __name__ == "__main__":
     # Load configuration

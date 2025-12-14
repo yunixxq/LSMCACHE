@@ -44,14 +44,14 @@ def weight_sampling_2d(l, o1, o2, n, r):
             r.append(s)
     return r
 
-# B / E (Bytes)
+# ✅B / E (Bytes) 这里的B是1个Memtable的大小
 def estimate_level(N, B, T, E):
     if (N * E) < B:
-        return 1;
+        return 1
 
     l = np.ceil(np.log((N * E / B) + 1) / np.log(T));
 
-    return l;
+    return l
 
 def estimate_T(N, mbuf, L, E, get_ceiling=True):
     return int(np.exp(np.log(((N * E) / (mbuf + 1)) + 1)) / L)

@@ -8,6 +8,7 @@ import re
 import shutil
 import subprocess
 import numpy as np
+import time
 
 THREADS = 32
 
@@ -420,8 +421,8 @@ class RocksDB(object):
         self.E = E >> 3  # bytes
         self.M = M >> 3  # bytes
         
-        if enable_epoch_log:
-            self.epoch_log_file = self.config["app"]["LOG_FILE_PATH"]
+        # if enable_epoch_log:
+        #     self.epoch_log_file = self.config["app"]["LOG_FILE_PATH"]
             # print(f"[RocksDB] Epoch log file: {self.epoch_log_file}")
         if is_leveling_policy:
             self.compaction_style = "level"
@@ -486,7 +487,7 @@ class RocksDB(object):
             f"--initial-alpha {initial_alpha}",
             # ===== 新增：epoch日志参数 =====
             f"--enable-epoch-log" if enable_epoch_log else "",
-            f"--epoch-log-file {self.epoch_log_file}",
+            # f"--epoch-log-file {self.epoch_log_file}",
         ]
 
         cmd = " ".join(cmd)

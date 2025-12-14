@@ -11,28 +11,26 @@ app:
     KEY_FILE_PATH: "data/keys.data"
     LOG_FILE_PATH: "data/log_file.csv"
 
-# 简易快速执行版
-lsm_tree_config: 
-    samples: 5          # 采样点减少，少跑几轮 RocksDB
-    scaling: 1          # 先保持 1，避免额外复杂度
-    M: 134217728        # 2^27 bits ≈ 16MB 内存
-    N: 100000           # 10 万条记录 ≈ 100MB 数据
-    Q: 20000            # 2 万查询
-    phi: 1
-    s: 4
-    E: 8192
-
-
-# # 与论文中的说明同步的设置
+# # 简易快速执行版
 # lsm_tree_config: 
-#     samples: 5
-#     scaling: 1    # 1 for training, 10 for testing
-#     M: 8589934592 # 总内存预算 1GB 2^30(1G) * 8(B) = 8589934592 bits
-#     N: 10000000  # entry 数量
-#     Q:   500000  # 查询数量
+#     samples: 5          # 采样点减少，少跑几轮 RocksDB
+#     M: 134217728        # 2^27 bits ≈ 16MB 内存
+#     N: 100000           # 10 万条记录 ≈ 100MB 数据
+#     Q: 20000            # 2 万查询
 #     phi: 1
-#     s: 4 # range query selectivity
-#     E: 8192    # bits/entry  1 KB 2^10(1K) * 8(B) = 8192 bits
+#     s: 4
+#     E: 8192
+
+
+lsm_tree_config: 
+    samples: 5
+    scaling: 1    # 1 for training, 10 for testing
+    M: 8589934592 # 总内存预算 1GB 2^30(1G) * 8(B) = 8589934592 bits
+    N: 10000000  # entry 数量 1000 万条记录 ≈ 10GB 数据
+    Q: 500000  # 查询数量 50 万查询
+    phi: 1
+    s: 4 # range query selectivity
+    E: 8192    # bits/entry  1 KB 2^10(1K) * 8(B) = 8192 bits
 
 
 jobs:
