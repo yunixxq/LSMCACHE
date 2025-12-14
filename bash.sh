@@ -19,5 +19,5 @@ tmux attach -t lsmacache
 # 删除会话
 # 直接kill指定会话
 tmux kill-session -t lsmacache
-# 在tmux会话中使用快捷键
+# 在tmux会话中使用快捷键 
 exit
