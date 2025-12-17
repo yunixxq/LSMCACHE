@@ -121,20 +121,24 @@ def get_cost_uniform(
     return [z0, z1, q, w, current_T, l, fpr, Mcache, Mbuf]
 
 # ✅ 只考虑Mbuf和Mcache的特征向量，不考虑T和h
+# 二改使用相对特征：使用规模无关的相对特征，使模型能泛化到不同数据规模
 def get_cost_uniform_only_ratio(
     current_ratio,
     z0,
     z1,
     q,
     w,
-    E,
-    M,
+    E, # bytes
+    M, # bytes
     N,
 ):
-    Mbuf = current_ratio * M / 8 # total write buffer in bytes
-    Mcache = (1 - current_ratio) * M / 8 # cache capacity in bytes  
+    Mbuf = current_ratio * M # total write buffer in bytes
+    Mcache = (1 - current_ratio) * M # cache capacity in bytes  
     l = estimate_level(N, Mbuf, 10, E) # N、T、E
-    return [z0, z1, q, w, l, Mcache, Mbuf]
+    total_data_size = N * E # bytes
+
+    return [z0, z1, q, w, l, current_ratio, M / total_data_size]
+    # return [z0, z1, q, w, l, Mcache, Mbuf]
 
 def get_cost(
     current_T,

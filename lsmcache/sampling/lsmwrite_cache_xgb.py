@@ -78,7 +78,7 @@ class LevelCost(object):
         self.logger.info(f"Workload : {z0},{z1},{q},{w}")
         self.logger.info(f"Building DB at size : {n}")
         row = self.config["lsm_tree_config"].copy()
-
+        # row[M]和row[E]均是config文件中的bits
         row["db_name"] = "level_cost"
         row["path_db"] = self.config["app"]["DATABASE_PATH"]
         row["T"] = 10 # 默认值

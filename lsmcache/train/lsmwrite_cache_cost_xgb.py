@@ -71,7 +71,7 @@ for num_sample in [18]:  # 每个工作负载的采样数量，因为工作负�
                 sample["q"],
                 sample["w"],
                 sample["E"] / 8, # bytes
-                sample["M"],
+                sample["M"] / 8, # bytes
                 sample["N"],
             )
         )
@@ -93,7 +93,7 @@ for num_sample in [18]:  # 每个工作负载的采样数量，因为工作负�
                 sample["q"],
                 sample["w"],
                 sample["E"] / 8,
-                sample["M"],
+                sample["M"] / 8,
                 sample["N"],
             )
         )
