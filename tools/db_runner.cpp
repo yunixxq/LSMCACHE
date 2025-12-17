@@ -48,7 +48,6 @@ typedef struct environment
 
     size_t B = 1 << 18;         //> 1 KB
     size_t E = 1 << 7;          //> 128 B
-    size_t file_size = 4 * 1024 * 1024; //> 4M B;
     double bits_per_element = 5.0;
     size_t N = 1e6;
     size_t L = 0;
@@ -107,7 +106,6 @@ environment parse_args(int argc, char *argv[])
                                           (option("-N", "--entries") & integer("num", env.N)) % ("total entries, default pick [default: " + to_string(env.N) + "]"),
                                           (option("-T", "--size-ratio") & number("ratio", env.T)) % ("size ratio, [default: " + fmt::format("{:.0f}", env.T) + "]"),
                                           (option("-K", "--runs-number") & number("runs", env.K)) % ("size ratio, [default: " + fmt::format("{:.0f}", env.K) + "]"),
-                                          (option("-f", "--file-size") & integer("size", env.file_size)) % ("file size (in bytes), [default: " + to_string(env.file_size) + "]"),
                                           (option("-B", "--buffer-size") & integer("size", env.B)) % ("buffer size (in bytes), [default: " + to_string(env.B) + "]"),
                                           (option("-M", "--total-memory-size") & integer("size", env.M)) % ("total memory size (in bytes), [default: " + to_string(env.M) + "]"), // ✅xxq新增，总内存预算
                                           (option("-E", "--entry-size") & integer("size", env.E)) % ("entry size (bytes) [default: " + to_string(env.E) + ", min: 32]"),
@@ -125,7 +123,7 @@ environment parse_args(int argc, char *argv[])
                                       (option("--skew") & number("num", env.skew)) % ("skewness for zipfian [0, 1)"),
                                       (option("--sel") & number("num", env.sel)) % ("selectivity of range query"),
                                       (option("--scaling") & number("num", env.scaling)) % ("scaling"),
-                                      (option("--cache").set(env.use_cache, true) & number("cap", env.cache_cap)) % "use block cache",
+                                      (option("--cache").set(env.use_cache, true) & integer("cap", env.cache_cap)) % "use block cache",
                                       (option("--key-log-file").set(env.use_key_log, true) & value("file", env.key_log_file)) % "use keylog to record each key"));
     // ===== ✅新增：动态调参选项 =====
     auto tuning_opt = ("dynamic tuning options:" % ((option("--enable-tuning").set(env.enable_dynamic_tuning, true)) % "enable dynamic memory tuning",
@@ -136,7 +134,7 @@ environment parse_args(int argc, char *argv[])
                                                     (option("--compaction-rate-high") & number("rate", env.compaction_rate_high)) % ("compaction rate high threshold [default: " + fmt::format("{:.1f}", env.compaction_rate_high) + "]"),
                                                     (option("--alpha-step") & number("step", env.alpha_step)) % ("alpha adjustment step [default: " + fmt::format("{:.2f}", env.alpha_step) + "]"),
                                                     (option("--stability-window") & integer("window", env.stability_window)) % ("stability window size [default: " + to_string(env.stability_window) + "]"),
-                                                    (option("--enable-epoch-log").set(env.enable_epoch_log, true)) % "enable epoch logging",
+                                                    (option("--enable-epoch-log").set(env.enable_epoch_log, true)) % "enable epoch logging"));
                                                     // (option("--epoch-log-file") & value("file", env.epoch_log_file)) % "epoch log file path"));
 
     auto minor_opt = ("minor options:" % ((option("--max_rocksdb_level") & integer("num", env.max_rocksdb_levels)) % ("limits the maximum levels rocksdb has [default: " + to_string(env.max_rocksdb_levels) + "]"),
@@ -321,19 +319,25 @@ int main(int argc, char *argv[])
     rocksdb_opt.bottommost_compression = kNoCompression;
     rocksdb_opt.use_direct_reads = true;
     rocksdb_opt.use_direct_io_for_flush_and_compaction = true;
-    rocksdb_opt.target_file_size_base = env.scaling * env.file_size;
 
     // 禁用 RocksDB 原生 Compaction
     rocksdb_opt.compaction_style = rocksdb::kCompactionStyleNone;
     rocksdb_opt.disable_auto_compactions = true;
-    rocksdb_opt.write_buffer_size = env.B / 2;
-    rocksdb_opt.max_write_buffer_number = 2; // MemTable数量 默认也是2
+    rocksdb_opt.write_buffer_size = env.B;
+    
+    // rocksdb_opt.max_write_buffer_number = 2; // MemTable数量 默认是2
+    // rocksdb_opt.max_bytes_for_level_multiplier = 10; // Size Ratio 默认是10
+    // rocksdb_opt.target_file_size_base = 64 * 1024 * 1024; // L1 SST_size 默认是64MB
+    // rocksdb_opt.target_file_size_multiplier = 1; L1+ SST_size 与前面的容量比
+    // spdlog::info("max_write_buffer_number: {}\n", rocksdb_opt.max_write_buffer_number);
+    // spdlog::info("max_bytes_for_level_multiplier: {}\n", rocksdb_opt.max_bytes_for_level_multiplier);
 
     // ==================== Step 3: 配置自定义 Compactor ====================
     tmpdb::Compactor *compactor = nullptr; //配置自定义的Compactor(CAMAL自行模拟)
     tmpdb::CompactorOptions compactor_opt;
+    
     compactor_opt.size_ratio = env.T;
-    compactor_opt.buffer_size = env.B / 2;
+    compactor_opt.buffer_size = env.B;
     compactor_opt.entry_size = env.E;
     compactor_opt.bits_per_element = env.bits_per_element;
     compactor_opt.num_entries = env.N;
@@ -345,7 +349,7 @@ int main(int argc, char *argv[])
     else
         compactor_opt.K = env.K;
 
-    compactor_opt.levels = tmpdb::Compactor::estimate_levels(env.N, env.T, env.E, env.B / 2) * compactor_opt.K + 1;
+    compactor_opt.levels = tmpdb::Compactor::estimate_levels(env.N, env.T, env.E, env.B) * compactor_opt.K + 1;
     rocksdb_opt.num_levels = compactor_opt.levels + 1;
 
     compactor = new tmpdb::Compactor(compactor_opt, rocksdb_opt);
@@ -353,6 +357,7 @@ int main(int argc, char *argv[])
 
     // ==================== Step 4: 配置 Block Cache ====================
     rocksdb::BlockBasedTableOptions table_options;
+    // spdlog::info("BlockSize: {}\n", table_options.block_size);
     table_options.read_amp_bytes_per_bit = 32; // 启用读放大统计功能
 
     // 配置Monkey Bloom filter(在不同的level调整bpe)
