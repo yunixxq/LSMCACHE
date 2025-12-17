@@ -15,22 +15,35 @@ from utils.model_xgb import traverse_for_T, traverse_for_h, iter_model
 from utils.lsm import *
 
 # 共15个
+# workloads = [
+#     (0.25, 0.25, 0.25, 0.25),
+#     (0.97, 0.01, 0.01, 0.01),
+#     (0.01, 0.97, 0.01, 0.01),
+#     (0.01, 0.01, 0.97, 0.01),
+#     (0.01, 0.01, 0.01, 0.97),
+#     (0.49, 0.49, 0.01, 0.01),
+#     (0.49, 0.01, 0.49, 0.01),
+#     (0.49, 0.01, 0.01, 0.49),
+#     (0.01, 0.49, 0.49, 0.01),
+#     (0.01, 0.49, 0.01, 0.49),
+#     (0.01, 0.01, 0.49, 0.49),
+#     (0.33, 0.33, 0.33, 0.01),
+#     (0.33, 0.33, 0.01, 0.33),
+#     (0.33, 0.01, 0.33, 0.33),
+#     (0.01, 0.33, 0.33, 0.33),
+# ]
+
+# 共9个
 workloads = [
-    (0.25, 0.25, 0.25, 0.25),
-    (0.97, 0.01, 0.01, 0.01),
-    (0.01, 0.97, 0.01, 0.01),
-    (0.01, 0.01, 0.97, 0.01),
-    (0.01, 0.01, 0.01, 0.97),
-    (0.49, 0.49, 0.01, 0.01),
-    (0.49, 0.01, 0.49, 0.01),
-    (0.49, 0.01, 0.01, 0.49),
-    (0.01, 0.49, 0.49, 0.01),
-    (0.01, 0.49, 0.01, 0.49),
-    (0.01, 0.01, 0.49, 0.49),
-    (0.33, 0.33, 0.33, 0.01),
-    (0.33, 0.33, 0.01, 0.33),
-    (0.33, 0.01, 0.33, 0.33),
-    (0.01, 0.33, 0.33, 0.33),
+    (0.00, 0.90, 0.00, 0.10), 
+    (0.00, 0.85, 0.00, 0.15),
+    (0.00, 0.80, 0.00, 0.20),
+    (0.00, 0.75, 0.00, 0.25),
+    (0.00, 0.70, 0.00, 0.30),
+    (0.00, 0.65, 0.00, 0.35),
+    (0.00, 0.60, 0.00, 0.40),
+    (0.00, 0.55, 0.00, 0.45),
+    (0.00, 0.50, 0.00, 0.50),
 ]
 
 config_yaml_path = os.path.join("lsmcache/config/config_lsm_cache.yaml")
@@ -93,6 +106,7 @@ class LevelCost(object):
             row["E"], # bits/entry
             row["M"], # bits/entry
             row["Mbuf"],
+            row["Mcache"],
             z0,
             z1,
             q,
@@ -101,7 +115,6 @@ class LevelCost(object):
             skew,
             queries,
             sel,
-            cache_cap=row["Mcache"],
             key_log=key_log,
             initial_alpha=ratio, # ✅新增
         )
@@ -110,7 +123,7 @@ class LevelCost(object):
             self.logger.info(f"{key} : {val}")
             row[f"{key}"] = val
 
-        row["L"] = estimate_level(N, row["Mbuf"] / 2, row["T"], E) # E(bytes)
+        row["L"] = estimate_level(N, row["Mbuf"], row["T"], E) # E(bytes)
         row["z0"] = z0
         row["z1"] = z1
         row["q"] = q
@@ -134,11 +147,11 @@ class LevelCost(object):
         for workload in workloads:
 
             min_err = 1e9
-            for ratio in np.arange(0.1, 0.9, 0.05):  # [0.1,0.9) 8个值
+            for ratio in np.arange(0.1, 0.91, 0.02):  # 0.1-0.90 step = 0.02，共41个值
                 Mbuf = ratio * M / 8 # bytes
                 Mcache = (1 - ratio) * M / 8 # bytes
                 dist = "zipf"
-                skew = 0.8
+                skew = 0.99
                 key_log = key_path + "/{}.dat".format(step)
                 row = self.single_run(
                     workload,
