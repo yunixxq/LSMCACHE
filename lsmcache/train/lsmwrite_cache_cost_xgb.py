@@ -23,10 +23,11 @@ with open(config_yaml_path) as f:
 LAT_PATH = config["samples_path"]["lsmcache_xgb_final"]
 HIT_PATH = config["samples_path"]["lsmcache_xgb_final"]
 
-FOLD = 15
+# FOLD = 15
+FOLD = 9
 
 # 分别训练两个模型，一个用于延迟/另一个用于命中率
-for num_sample in [18]:  # 每个工作负载的采样数量，因为工作负载数=FOLD数
+for num_sample in [41]:  # 每个工作负载的采样数量，因为工作负载数=FOLD数
     start_time = time.time() # s
     print("Start level training")
 
