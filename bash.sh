@@ -1,4 +1,5 @@
 # Set up cmake
+mkdir build && mkdir data
 cmake -S . -B build
 # Build rocksdb
 cmake --build build
@@ -12,7 +13,7 @@ rm -rf /tmp/level_optimizer
 
 python3 
 
-# tmux会话
+# tmux会话 新建 + 重新进入
 tmux new -s lsmacache
 tmux attach -t lsmacache
 
@@ -21,3 +22,11 @@ tmux attach -t lsmacache
 tmux kill-session -t lsmacache
 # 在tmux会话中使用快捷键 
 exit 
+
+# 重定向标准输出和标准错误（全部输出）
+python script.py > /home/ubuntu/projects/LSMCACHE/data/output.txt 2>&1
+# /home/ubuntu/projects/LSMCACHE/data/output.txt
+
+python3 /home/ubuntu/projects/LSMCACHE/lsmcache/sampling/lsmwrite_cache_xgb.py  > /home/ubuntu/projects/LSMCACHE/data/output.txt 2>&1
+python3 /home/ubuntu/projects/LSMCACHE/lsmcache/train/lsmwrite_cache_cost_xgb.py > /home/ubuntu/projects/LSMCACHE/data/output.txt 2>&1
+python3 /home/ubuntu/projects/LSMCACHE/lsmcache/optimizer/lsmwrite_cache_xgb_optimizer.py > /home/ubuntu/projects/LSMCACHE/data/output.txt 2>&1
