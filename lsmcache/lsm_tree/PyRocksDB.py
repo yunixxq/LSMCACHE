@@ -26,6 +26,8 @@ class RocksDB(object):
         """
         self.config = config
         self.logger = logging.getLogger("rlt_logger")
+
+        
         self.epoch_log_file = ""
 
         # 编译正则表达式
@@ -91,9 +93,9 @@ class RocksDB(object):
         return db_settings
 
     def _log_run_params(self, db_dir, num_z0, num_z1, num_q, num_w, steps, 
-                        sel, dist, skew, cache_cap, key_log, scaling,
+                        sel, dist, skew,
                         enable_dynamic_tuning, epoch_size, initial_alpha,
-                        enable_epoch_log, f, K):
+                        enable_epoch_log):
         """格式化输出运行参数"""
         self.logger.info("=" * 60)
         self.logger.info("RocksDB Run Parameters")
@@ -106,15 +108,13 @@ class RocksDB(object):
         self.logger.info(f"  T (size ratio)    : {self.T}")
         self.logger.info(f"  E (entry size)    : {self.E} bytes")
         self.logger.info(f"  h (BF bits)       : {self.h}")
-        self.logger.info(f"  K                 : {K if K else 'N/A'}")
-        self.logger.info(f"  f                 : {f if f else 'N/A'}")
         self.logger.info(f"  compaction_style  : {self.compaction_style}")
         
         # 内存配置
         self.logger.info("[Memory Config]")
-        self.logger.info(f"  M (total memory)  : {self.M} bytes ({self.M / 1024 / 1024:.2f} MB)")
-        self.logger.info(f"  B (write buffer)  : {self.mbuff} bytes ({self.mbuff / 1024 / 1024:.2f} MB)")
-        self.logger.info(f"  cache_cap         : {cache_cap} bytes ({cache_cap / 1024 / 1024:.2f} MB)")
+        self.logger.info(f"  M (total memory)     : {self.M} bytes ({self.M / 1024 / 1024:.2f} MB)")
+        self.logger.info(f"  Mbuf (write buffer)  : {self.mbuf} bytes ({self.mbuf / 1024 / 1024:.2f} MB)")
+        self.logger.info(f"  Mcache (block cache) : {self.mcache} bytes ({self.mcache / 1024 / 1024:.2f} MB)")
         
         # 工作负载配置
         self.logger.info("[Workload Config]")
@@ -126,8 +126,6 @@ class RocksDB(object):
         self.logger.info(f"  sel               : {sel}")
         self.logger.info(f"  dist              : {dist}")
         self.logger.info(f"  skew              : {skew}")
-        self.logger.info(f"  scaling           : {scaling}")
-        self.logger.info(f"  key_log           : {key_log if key_log else 'N/A'}")
         
         # 动态调参配置
         self.logger.info("[Dynamic Tuning]")
@@ -380,7 +378,8 @@ class RocksDB(object):
         N,
         E,
         M,
-        mbuff,
+        mbuf,
+        mcache,
         num_z0,
         num_z1,
         num_q,
@@ -391,11 +390,7 @@ class RocksDB(object):
         sel=0,
         is_leveling_policy=True,
         auto_compaction=False,
-        cache_cap=0,
-        K="",
-        f="",
         key_log="",
-        scaling=1,
         # 新增：动态调参相关参数
         enable_dynamic_tuning=False,
         epoch_size=1000,
@@ -416,14 +411,10 @@ class RocksDB(object):
         self.path_db = path_db
         self.db_name = db_name
         self.h, self.T = h, int(np.ceil(T))
-        self.K = K
         self.N, self.M = int(N), int(M)
         self.E = E >> 3  # bytes
         self.M = M >> 3  # bytes
         
-        # if enable_epoch_log:
-        #     self.epoch_log_file = self.config["app"]["LOG_FILE_PATH"]
-            # print(f"[RocksDB] Epoch log file: {self.epoch_log_file}")
         if is_leveling_policy:
             self.compaction_style = "level"
         else:
@@ -431,7 +422,8 @@ class RocksDB(object):
         if auto_compaction:
             self.compaction_style = "auto"
         os.makedirs(os.path.join(self.path_db, self.db_name), exist_ok=True)
-        self.mbuff = int(mbuff) # bytes
+        self.mbuf = int(mbuf) # bytes
+        self.mcache = int(mcache) # bytes
         db_dir = os.path.join(self.path_db, self.db_name)
 
         # 调用日志函数进行格式化输出
@@ -445,15 +437,10 @@ class RocksDB(object):
             sel=sel,
             dist=dist,
             skew=skew,
-            cache_cap=cache_cap,
-            key_log=key_log,
-            scaling=scaling,
             enable_dynamic_tuning=enable_dynamic_tuning,
             epoch_size=epoch_size,
             initial_alpha=initial_alpha,
             enable_epoch_log=enable_epoch_log,
-            f=f,
-            K=K,
         )
 
         # 构建执行命令
@@ -462,12 +449,10 @@ class RocksDB(object):
             db_dir,
             f"-N {self.N}",
             f"-T {self.T}",
-            f"-K {K}" if K != "" else "",
-            f"-B {self.mbuff}",
+            f"-B {self.mbuf}",
             f"-M {self.M}", # ✅增加总内存预算(bytes)
             f"-E {self.E}", # bytes
             f"-b {self.h}",
-            f"-f {f}" if f != "" else "",
             f"-e {num_z0}",
             f"-r {num_z1}",
             f"-q {num_q}",
@@ -475,11 +460,10 @@ class RocksDB(object):
             f"-s {steps}",
             f"-c {self.compaction_style}",
             f"--sel {sel}",
-            f"--scaling {scaling}",
             f"--parallelism {THREADS}",
             f"--dist {dist}",
             f"--skew {skew}",
-            f"--cache {cache_cap}",
+            f"--cache {self.mcache}",
             f"--key-log-file {key_log}",
             # ===== 新增：动态调参参数 =====
             f"--enable-tuning" if enable_dynamic_tuning else "",
@@ -487,7 +471,6 @@ class RocksDB(object):
             f"--initial-alpha {initial_alpha}",
             # ===== 新增：epoch日志参数 =====
             f"--enable-epoch-log" if enable_epoch_log else "",
-            # f"--epoch-log-file {self.epoch_log_file}",
         ]
 
         cmd = " ".join(cmd)

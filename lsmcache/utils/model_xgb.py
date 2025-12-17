@@ -46,7 +46,7 @@ def prepare_df(samples, save_path):
         row = {}
         if sample["read_io"] + sample["write_io"] == 0:
             continue
-        l = estimate_level(sample["N"], sample["mbuf"] / 2, sample["T"], get_ceiling=False)
+        l = estimate_level(sample["N"], sample["mbuf"], sample["T"], get_ceiling=False)
         fpr = np.exp(-1 * sample["h"] * (np.log(2) ** 2))
         data = np.zeros([int(sample["N"])])
         with open(sample["key_log"], "r") as f:
@@ -97,7 +97,7 @@ def get_cache(current_T, current_h, current_ratio, alpha, c, z0, z1, q, w, M, N)
     fpr = estimate_fpr(current_h)
     buffer = current_ratio * (M - current_h * N)
     cache_cap = (1 - current_ratio) * (M - current_h * N) / 8
-    l = estimate_level(N, buffer / 2, current_T)
+    l = estimate_level(N, buffer, current_T)
     return [alpha, c, z0, z1, q, w, current_T, l, fpr, cache_cap, buffer]
 
 # ✅ 各个参数组合对应的特征向量
@@ -116,11 +116,25 @@ def get_cost_uniform(
 ):
     fpr = estimate_fpr(current_h)
     Mbuf = current_ratio * M / 8 # total write buffer in bytes
-    Mmemtable = Mbuf / 2 # single write buffer(Memtable) size in bytes
     Mcache = (1 - current_ratio) * M / 8 # cache capacity in bytes  
-    l = estimate_level(N, Mmemtable, current_T, E)
+    l = estimate_level(N, Mbuf, current_T, E)
     return [z0, z1, q, w, current_T, l, fpr, Mcache, Mbuf]
 
+# ✅ 只考虑Mbuf和Mcache的特征向量，不考虑T和h
+def get_cost_uniform_only_ratio(
+    current_ratio,
+    z0,
+    z1,
+    q,
+    w,
+    E,
+    M,
+    N,
+):
+    Mbuf = current_ratio * M / 8 # total write buffer in bytes
+    Mcache = (1 - current_ratio) * M / 8 # cache capacity in bytes  
+    l = estimate_level(N, Mbuf, 10, E) # N、T、E
+    return [z0, z1, q, w, l, Mcache, Mbuf]
 
 def get_cost(
     current_T,
@@ -139,7 +153,7 @@ def get_cost(
     fpr = estimate_fpr(current_h)
     buffer = current_ratio * (M - current_h * N)
     cache_cap = (1 - current_ratio) * M / 8
-    l = estimate_level(N, buffer / 2, current_T)
+    l = estimate_level(N, buffer, current_T)
     return [alpha, c, z0, z1, q, w, current_T, l, fpr, cache_cap, buffer, y_cache]
 
 # CAMAL
@@ -243,7 +257,70 @@ def traverse_var_optimizer_uniform2(cost_models, cost_hit_models, policy, z0, z1
     # 返回值格式保持与原始API一致
     return best_T, best_h, best_ratio
 
+# xxq2
+def traverse_var_optimizer_uniform2_only_ratio(cost_models, cost_hit_models, z0, z1, q, w, E, M, N):
+    start_time = time.time()
 
+    # -------------------------------
+    # 1️⃣ 穷举所有候选配置
+    # -------------------------------    
+    xs = [] # 记录所有候选ratio经过get_cost_uniform()的特征向量
+    settings = [] # 保存候选ratio
+    # 17个候选设计
+    for ratio in np.arange(0.1, 0.91, 0.02):
+        x = get_cost_uniform_only_ratio(ratio, z0, z1, q, w, E, M, N)
+        settings.append(ratio)
+        xs.append(x)
+    X = np.array(xs) # 16组参数配置，即X.shape=(16,9) 7是指7个特征维度(new)
+    total_candidates = len(xs)
+    print("输出总的候选样本数：", total_candidates)
+
+    # -------------------------------
+    # 2️⃣ 第一阶段 —— 延迟模型计算 cost_mean, cost_var
+    # -------------------------------
+    latency_preds = [] # 保存每个延迟模型对所有配置的预测结果
+    for model in cost_models: # ✅训练得到的15折模型
+        latency = model.predict(X)
+        latency_preds.append(latency)
+
+    latency_preds = np.array(latency_preds)
+    latency_mean = np.mean(latency_preds, axis=0) 
+    latency_var = np.var(latency_preds, axis=0)
+
+    latency_sorted = sorted(
+        zip(latency_mean, latency_var, settings, range(total_candidates)),
+        key=lambda x: (x[0], x[1])  # 先按 cost_mean，再按 variance
+    )
+
+    # -------------------------------
+    # 3️⃣ 选择latency最小的前K个候选
+    # -------------------------------
+    # K = min(int(total_candidates * 0.5), 20)
+    K = 5 
+    topK = latency_sorted[:K]
+
+    # -------------------------------
+    # 4️⃣ 第二阶段 —— 命中率模型预测 hit_rate
+    # -------------------------------
+    hit_preds = []
+    for entry in topK:
+        _, _, setting, idx = entry # 前两个变量为"_"表示去除latency_mean和latency_var
+        x_feat = X[idx].reshape(1, -1)  # 单个样本特征(1行9列)
+
+        # 所有 hit-rate 模型预测
+        preds = [m.predict(x_feat)[0] for m in cost_hit_models]
+        hit_mean = np.mean(preds)
+        hit_preds.append((hit_mean, setting))
+    hit_preds.sort(key=lambda x: -x[0])  # 从大到小排序
+    best_hit_rate, best_setting = hit_preds[0]
+    # print("best_setting = ", best_setting, "len=", len(best_setting))
+    best_ratio = best_setting
+
+    print(f"[Optimizer] 搜索静态最优配置耗时: {time.time() - start_time:.3f}s")
+    print(f"[Optimizer] Best(ratio={best_ratio}), hit={best_hit_rate}")
+
+    # 返回值格式保持与原始API一致
+    return best_ratio
 def traverse_var_optimizer_uniform_T(cost_models, policy, z0, z1, q, w, M, N):
     start_time = time.time()
     costs = []

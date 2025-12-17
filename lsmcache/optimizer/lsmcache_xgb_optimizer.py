@@ -20,55 +20,54 @@ np.set_printoptions(suppress=True)
 config_yaml_path = os.path.join("lsmcache/config/config_lsm_cache.yaml")
 with open(config_yaml_path) as f:
     config = yaml.load(f, Loader=yaml.FullLoader)
-scaling = config["lsm_tree_config"]["scaling"]
+
 E = config["lsm_tree_config"]["E"] / 8 # bits/entry -> Bytes/entry
-Q = int(config["lsm_tree_config"]["Q"] * scaling) 
+Q = int(config["lsm_tree_config"]["Q"]) 
 B = int(4096 / E) # entries per page
-M = config["lsm_tree_config"]["M"] * scaling # total memory in bits
-N = config["lsm_tree_config"]["N"] * scaling # total entries
+M = config["lsm_tree_config"]["M"] # total memory in bits
+N = config["lsm_tree_config"]["N"] # total entries
 sel = config["lsm_tree_config"]["s"]
 workloads = [
     (0.25, 0.25, 0.25, 0.25),
-    (0.97, 0.01, 0.01, 0.01),
-    (0.01, 0.97, 0.01, 0.01),
-    (0.01, 0.01, 0.97, 0.01),
-    #(0.01, 0.01, 0.01, 0.97),
-    (0.49, 0.49, 0.01, 0.01),
-    (0.49, 0.01, 0.49, 0.01),
-    #(0.49, 0.01, 0.01, 0.49),
-    (0.01, 0.49, 0.49, 0.01),
-    (0.01, 0.49, 0.01, 0.49),
-    (0.01, 0.01, 0.49, 0.49),
-    (0.33, 0.33, 0.33, 0.01),
-    (0.33, 0.33, 0.01, 0.33),
-    (0.33, 0.01, 0.33, 0.33),
-    (0.01, 0.33, 0.33, 0.33),
-    (0.91, 0.03, 0.03, 0.03),
-    (0.75, 0.15, 0.05, 0.05),
-    (0.60, 0.30, 0.05, 0.05),
-    (0.45, 0.45, 0.05, 0.05),
-    (0.30, 0.60, 0.05, 0.05),
-    (0.15, 0.75, 0.05, 0.05),
-    (0.03, 0.91, 0.03, 0.03),
-    (0.05, 0.75, 0.15, 0.05),
-    (0.05, 0.60, 0.30, 0.05),
-    (0.05, 0.45, 0.45, 0.05),
-    (0.05, 0.30, 0.60, 0.05),
-    (0.05, 0.15, 0.75, 0.05),
-    (0.03, 0.03, 0.91, 0.03),
-    (0.05, 0.05, 0.75, 0.15),
-    (0.05, 0.05, 0.60, 0.30),
-    (0.05, 0.05, 0.45, 0.45),
-    (0.05, 0.05, 0.30, 0.60),
-    (0.05, 0.05, 0.15, 0.75),
-    (0.03, 0.03, 0.03, 0.91),
-    (0.15, 0.05, 0.05, 0.75),
-    (0.30, 0.05, 0.05, 0.60),
-    (0.45, 0.05, 0.05, 0.45),
-    (0.60, 0.05, 0.05, 0.30),
-    (0.75, 0.05, 0.05, 0.15),
+    # (0.97, 0.01, 0.01, 0.01),
+    # (0.01, 0.97, 0.01, 0.01),
+    # (0.01, 0.01, 0.97, 0.01),
+    # #(0.01, 0.01, 0.01, 0.97),
+    # (0.49, 0.49, 0.01, 0.01),
+    # (0.49, 0.01, 0.49, 0.01),
+    # #(0.49, 0.01, 0.01, 0.49),
+    # (0.01, 0.49, 0.49, 0.01),
+    # (0.01, 0.49, 0.01, 0.49),
+    # (0.01, 0.01, 0.49, 0.49),
+    # (0.33, 0.33, 0.33, 0.01),
+    # (0.33, 0.33, 0.01, 0.33),
+    # (0.33, 0.01, 0.33, 0.33),
+    # (0.01, 0.33, 0.33, 0.33),
+    # (0.91, 0.03, 0.03, 0.03),
+    # (0.75, 0.15, 0.05, 0.05),
+    # (0.60, 0.30, 0.05, 0.05),
+    # (0.45, 0.45, 0.05, 0.05),
+    # (0.30, 0.60, 0.05, 0.05),
+    # (0.15, 0.75, 0.05, 0.05),
+    # (0.03, 0.91, 0.03, 0.03),
+    # (0.05, 0.75, 0.15, 0.05),
+    # (0.05, 0.60, 0.30, 0.05),
+    # (0.05, 0.45, 0.45, 0.05),
+    # (0.05, 0.30, 0.60, 0.05),
+    # (0.05, 0.15, 0.75, 0.05),
+    # (0.03, 0.03, 0.91, 0.03),
+    # (0.05, 0.05, 0.75, 0.15),
+    # (0.05, 0.05, 0.60, 0.30),
+    # (0.05, 0.05, 0.45, 0.45),
+    # (0.05, 0.05, 0.30, 0.60),
+    # (0.05, 0.05, 0.15, 0.75),
+    # (0.03, 0.03, 0.03, 0.91),
+    # (0.15, 0.05, 0.05, 0.75),
+    # (0.30, 0.05, 0.05, 0.60),
+    # (0.45, 0.05, 0.05, 0.45),
+    # (0.60, 0.05, 0.05, 0.30),
+    # (0.75, 0.05, 0.05, 0.15),
 ]
-
 
 class Optimizer(object):
     def __init__(self, config):
@@ -133,16 +132,16 @@ class Optimizer(object):
                 M,
                 N,
             )
+            
+            print(f"CAMAL主动学习获得的静态最优参数: best_T: {best_T}, best_h: {best_h}, best_ratio: {best_ratio}")
+
             row["is_leveling_policy"] = True
-            # print(
-            #     f"level_optimizer: best_T: {best_T}, best_h: {best_h}, best_ratio: {best_ratio}"
-            # )
             row["T"] = int(best_T)
             row["h"] = best_h # bpe
             row["ratio"] = best_ratio
-            row["mbuf"] = best_ratio * (M - best_h * N) / 8 # bytes
-            row["cache_cap"] = (1 - best_ratio) * (M - best_h * N) / 8 # bytes
-            self.logger.info(f"Building DB at size : {N}")
+            row["Mbuf"] = best_ratio * M / 8 # bytes
+            row["Mcache"] = (1 - best_ratio) * M # bytes
+
             db = RocksDB(self.config)
             results = db.run(
                 row["db_name"],
@@ -152,7 +151,7 @@ class Optimizer(object):
                 row["N"], 
                 row["E"],
                 row["M"],
-                row["mbuf"], # 根据最佳h和ratio计算得到的写内存大小
+                row["Mbuf"], # 根据最佳h和ratio计算得到的写内存大小
                 z0,
                 z1,
                 q,
@@ -162,9 +161,8 @@ class Optimizer(object):
                 Q,
                 sel,
                 is_leveling_policy=row["is_leveling_policy"],
-                cache_cap=row["cache_cap"], # 根据最佳h和ratio计算得到的块缓存大小
+                cache_cap=row["Mbuf"], # 根据最佳h和ratio计算得到的块缓存大小
                 key_log=key_log,
-                scaling=scaling,
                 # 动态调参相关参数
                 enable_dynamic_tuning=True,
                 initial_alpha=row["ratio"],
@@ -174,15 +172,17 @@ class Optimizer(object):
             for key, val in results.items():
                 self.logger.info(f"{key} : {val}")
                 row[f"{key}"] = val
-            row["write_io"] = (
-                row["bytes_written"]
-                + row["compact_read"]
-                + row["compact_write"]
-                + row["flush_written"]
-            ) / 4096
-            self.logger.info("write_io: {}".format(row["write_io"]))
-            self.logger.info("mbuf: {}".format(row["mbuf"]))
+
+            # row["write_io"] = (
+            #     row["bytes_written"]
+            #     + row["compact_read"]
+            #     + row["compact_write"]
+            #     + row["flush_written"]
+            # ) / 4096
+            # self.logger.info("write_io: {}".format(row["write_io"]))
+            # self.logger.info("mbuf: {}".format(row["mbuf"]))
             # print(row)
+
             df.append(row)
             pd.DataFrame(df).to_csv(self.config["optimizer_path"]["lsmcache_ckpt"])
             xgb_t.append(row["total_latency"])

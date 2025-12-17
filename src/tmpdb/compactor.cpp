@@ -170,7 +170,7 @@ void Compactor::OnFlushCompleted(rocksdb::DB *db, const ROCKSDB_NAMESPACE::Flush
     // 检查每一层是否需要Compaction，从L0开始向下遍历所有非空层
     int largest_level_idx = this->largest_occupied_level(db);
 
-    int count = 0;
+    // int count = 0;
     for (int level_idx = 0; level_idx <= largest_level_idx; level_idx++)
     {
         CompactionTask *task = nullptr;
@@ -183,11 +183,15 @@ void Compactor::OnFlushCompleted(rocksdb::DB *db, const ROCKSDB_NAMESPACE::Flush
             }
             // Schedule compaction in a different thread.
             ScheduleCompaction(task);
-            count++;
+            // count++;
         }
     }
-    // 检查一次flush是否会引发级联的多次Compaction
-    printf("OnFlushCompleted: triggered %d compactions after flush\n", count);
+
+    // // 检查一次flush是否会引发级联的多次Compaction
+    // if(count != 0)
+    // {
+    //     printf("OnFlushCompleted: triggered %d compactions after flush\n", count);
+    // }
 }
 
 // ✅新增：OnCompactionCompleted
@@ -319,7 +323,7 @@ void Compactor::CompactFiles(void *arg)
                 
             if (cascade_task != nullptr)
             {
-                spdlog::debug("Cascade compaction triggered: L{} -> L{}",
+                spdlog::info("Cascade compaction triggered: L{} -> L{}",
                               level_idx, cascade_task->output_level);
                 compactor->ScheduleCompaction(cascade_task);
             }
