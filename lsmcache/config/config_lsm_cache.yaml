@@ -7,18 +7,19 @@ app:
 
     EXECUTION_PATH: "build/db_runner"
     DYNAMIC_EXECUTION_PATH: "build/db_runner_dynamic"
-    DATABASE_PATH: "/tmp"
+    # DATABASE_PATH: "/tmp"
+    DATABASE_PATH: "/data"
     KEY_FILE_PATH: "data/keys.data"
     LOG_FILE_PATH: "data/log_file.csv"
 
-# 简易快速执行版
-lsm_tree_config: 
-    M: 134217728        # 2^27 bits ≈ 16MB 内存
-    N: 100000           # 10 万条记录 ≈ 100MB 数据
-    Q: 20000            # 2 万查询
-    phi: 1
-    s: 4
-    E: 8192
+# # 简易快速执行版
+# lsm_tree_config: 
+#     M: 134217728        # 2^27 bits ≈ 16MB 内存
+#     N: 100000           # 10 万条记录 ≈ 100MB 数据
+#     Q: 20000            # 2 万查询
+#     phi: 1
+#     s: 4
+#     E: 8192
 
 
 lsm_tree_config: 
