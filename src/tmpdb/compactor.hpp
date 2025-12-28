@@ -16,6 +16,7 @@
 
 namespace tmpdb
 {
+    class MemoryTuner;
 
     class BaseCompactor;
 
@@ -67,35 +68,41 @@ namespace tmpdb
     // 新增：Compaction 统计结构
     struct CompactionStats
     {
-        // ===== Flush 统计 =====
+        // Flush 统计 
         std::atomic<uint64_t> total_flush_count{0};
         std::atomic<uint64_t> epoch_flush_count{0};
         
-        // ===== Compaction 计数 =====
+        // Flush分类统计
+        std::atomic<uint64_t> memory_triggered_flush_count{0};
+        std::atomic<uint64_t> epoch_memory_triggered_flush_count{0};
+        std::atomic<uint64_t> log_triggered_flush_count{0};
+        std::atomic<uint64_t> epoch_log_triggered_flush_count{0};
+
+        // Compaction 计数 
         std::atomic<uint64_t> total_compaction_count{0};
         std::atomic<uint64_t> epoch_compaction_count{0};
-        
-        // ===== 文件统计 =====
+
+        // 文件统计 
         std::atomic<uint64_t> total_input_files{0};
         std::atomic<uint64_t> epoch_input_files{0};
         std::atomic<uint64_t> total_output_files{0};
         std::atomic<uint64_t> epoch_output_files{0};
         
-        // ===== 字节统计 =====
+        // 字节统计
         std::atomic<uint64_t> total_compaction_read_bytes{0};
         std::atomic<uint64_t> epoch_compaction_read_bytes{0};
         std::atomic<uint64_t> total_compaction_write_bytes{0};
         std::atomic<uint64_t> epoch_compaction_write_bytes{0};
         
-        // ===== 时间统计 =====
+        // 时间统计
         std::atomic<uint64_t> total_compaction_time_us{0};
         std::atomic<uint64_t> epoch_compaction_time_us{0};
         
-        // ===== 每层统计 =====
+        // 每层统计
         static constexpr int MAX_LEVELS = 16;
         std::atomic<uint64_t> compaction_count_per_level[MAX_LEVELS] = {};
         
-        // ===== 时间戳 =====
+        // 时间戳
         std::chrono::steady_clock::time_point epoch_start_time;
         
         CompactionStats() {
@@ -105,6 +112,8 @@ namespace tmpdb
         // 重置epoch统计（每个监测周期调用）
         void reset_epoch() {
             epoch_flush_count = 0;
+            epoch_memory_triggered_flush_count = 0; // ✅ 用于Breaking Walls Write Cost系数
+            epoch_log_triggered_flush_count = 0;
             epoch_compaction_count = 0;
             epoch_input_files = 0;
             epoch_output_files = 0;
@@ -171,98 +180,102 @@ namespace tmpdb
 
     class Compactor : public BaseCompactor
     {
-    public:
-        std::mutex compactions_left_mutex;
-        std::mutex meta_data_mutex;
-        std::atomic<int> compactions_left_count;
+        private:
+            MemoryTuner* memory_tuner_ = nullptr;  // ✅ 添加 Memory Tuner 指针
+        public:
+            std::mutex compactions_left_mutex;
+            std::mutex meta_data_mutex;
+            std::atomic<int> compactions_left_count;
 
-        // ===== 新增：统计信息 =====
-        CompactionStats stats;
+            // 新增：统计信息
+            CompactionStats stats;
 
-        /**
-         * @brief Construct a new Compactor object
-         *
-         * @param compactor_opt
-         * @param rocksdb_opt
-         */
-        Compactor(const CompactorOptions compactor_opt, const rocksdb::Options rocksdb_opt)
-            : BaseCompactor(compactor_opt, rocksdb_opt), compactions_left_count(0){};
+            void set_memory_tuner(MemoryTuner* tuner) {
+                memory_tuner_ = tuner;
+            }
 
-        /**
-         * @brief
-         *
-         * @param db
-         * @return int
-         */
-        int largest_occupied_level(rocksdb::DB *db) const;
+            /**
+             * @brief Construct a new Compactor object
+             *
+             * @param compactor_opt
+             * @param rocksdb_opt
+             */
+            Compactor(const CompactorOptions compactor_opt, const rocksdb::Options rocksdb_opt)
+                : BaseCompactor(compactor_opt, rocksdb_opt), compactions_left_count(0){};
 
-        /// @brief
-        /// @param db
-        /// @param compactor_opt
-        /// @param num_entries
-        /// @return
-        std::vector<size_t> calculate_level_capacity(CompactorOptions compactor_opt);
+            /**
+             * @brief
+             *
+             * @param db
+             * @return int
+             */
+            int largest_occupied_level(rocksdb::DB *db) const;
 
-        /**
-         * @brief
-         *
-         * @param db
-         * @param cf_name
-         * @param level
-         * @return CompactionTask*
-         */
-        CompactionTask *PickCompaction(rocksdb::DB *db, const std::string &cf_name, const size_t level) override;
-        /**
-         * @brief
-         *
-         * @param db
-         * @param info
-         */
-        void OnFlushCompleted(rocksdb::DB *db, const ROCKSDB_NAMESPACE::FlushJobInfo &info) override;
+            /// @brief
+            /// @param db
+            /// @param compactor_opt
+            /// @param num_entries
+            /// @return
+            std::vector<size_t> calculate_level_capacity(CompactorOptions compactor_opt);
 
-        // ===== 新增：Compaction 完成回调 =====
-        void OnCompactionCompleted(rocksdb::DB *db, const ROCKSDB_NAMESPACE::CompactionJobInfo &info) override;
-        /**
-         * @brief
-         *
-         * @param arg
-         */
-        static void CompactFiles(void *arg);
+            /**
+             * @brief
+             *
+             * @param db
+             * @param cf_name
+             * @param level
+             * @return CompactionTask*
+             */
+            CompactionTask *PickCompaction(rocksdb::DB *db, const std::string &cf_name, const size_t level) override;
+            /**
+             * @brief
+             *
+             * @param db
+             * @param info
+             */
+            void OnFlushCompleted(rocksdb::DB *db, const ROCKSDB_NAMESPACE::FlushJobInfo &info) override;
 
-        /**
-         * @brief
-         *
-         * @param task
-         */
-        void ScheduleCompaction(CompactionTask *task) override;
+            // 新增：Compaction 完成回调
+            // void OnCompactionCompleted(rocksdb::DB *db, const ROCKSDB_NAMESPACE::CompactionJobInfo &info) override;
+            /**
+             * @brief
+             *
+             * @param arg
+             */
+            static void CompactFiles(void *arg);
 
-        bool requires_compaction(rocksdb::DB *db);
+            /**
+             * @brief
+             *
+             * @param task
+             */
+            void ScheduleCompaction(CompactionTask *task) override;
 
-        /**
-         * @brief Estimates the number of levels needed based on
-         *
-         * @param N Total number of entries
-         * @param T Size ratio
-         * @param E Entry size
-         * @param B Buffer size
-         * @return size_t Number of levels
-         */
-        static size_t estimate_levels(size_t N, double T, size_t E, size_t B);
+            bool requires_compaction(rocksdb::DB *db);
 
-        /**
-         * @brief Calculates the nubmer of elements assuming a tree with the
-         *        respective parameters is full.
-         *
-         * @param T size ratio
-         * @param E entry size
-         * @param B buffer size
-         * @param L number of levels
-         */
-        static size_t calculate_full_tree(double T, size_t E, size_t B, size_t L);
-        void updateT(int T);
-        void updateM(size_t M);
-        // ===== 新增：获取统计快照(暂未使用) =====
-        // CompactionStats get_stats_snapshot() const { return stats; }
+            /**
+             * @brief Estimates the number of levels needed based on
+             *
+             * @param N Total number of entries
+             * @param T Size ratio
+             * @param E Entry size
+             * @param B Buffer size
+             * @return size_t Number of levels
+             */
+            static size_t estimate_levels(size_t N, double T, size_t E, size_t B);
+
+            /**
+             * @brief Calculates the nubmer of elements assuming a tree with the
+             *        respective parameters is full.
+             *
+             * @param T size ratio
+             * @param E entry size
+             * @param B buffer size
+             * @param L number of levels
+             */
+            static size_t calculate_full_tree(double T, size_t E, size_t B, size_t L);
+            void updateT(int T);
+            void updateM(size_t M);
     };
 
 } /* namespace tmpdb */

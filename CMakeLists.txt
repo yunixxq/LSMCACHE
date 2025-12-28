@@ -143,8 +143,8 @@ target_link_libraries(db_runner tmpdb tools)
 add_executable(db_runner_dynamic ${CMAKE_SOURCE_DIR}/tools/db_runner_dynamic.cpp)
 target_link_libraries(db_runner_dynamic tmpdb tools)
 
-# add_executable(sim_runner ${CMAKE_SOURCE_DIR}/tools/sim_runner.cpp)
-# target_link_libraries(sim_runner tmpdb tools)
+add_executable(db_runner_with_tuner ${CMAKE_SOURCE_DIR}/tools/db_runner_with_tuner.cpp)
+target_link_libraries(db_runner_with_tuner tmpdb tools)
 
 add_executable(key_gen ${CMAKE_SOURCE_DIR}/tools/key_gen.cpp)
 target_link_libraries(key_gen tmpdb tools)

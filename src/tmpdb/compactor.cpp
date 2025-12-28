@@ -1,4 +1,5 @@
 #include "tmpdb/compactor.hpp"
+#include "memory_tuner.hpp"
 
 using namespace tmpdb;
 using namespace ROCKSDB_NAMESPACE;
@@ -163,9 +164,34 @@ CompactionTask *Compactor::PickCompaction(rocksdb::DB *db,
 // → Compactor::OnFlushCompleted → PickCompaction → ScheduleCompaction
 void Compactor::OnFlushCompleted(rocksdb::DB *db, const ROCKSDB_NAMESPACE::FlushJobInfo &info)
 {
-    // ===== 记录 Flush 统计 =====
+    // ===== 记录 Flush 统计 ===== 
     stats.total_flush_count++;
     stats.epoch_flush_count++;
+
+    // ✅ 区分flush类型
+    // 根据FlushReason判断是memory-triggered还是log-triggered
+    switch (info.flush_reason) {
+        // 1️⃣ 内存压力触发
+        case ROCKSDB_NAMESPACE::FlushReason::kWriteBufferFull:
+        case ROCKSDB_NAMESPACE::FlushReason::kWriteBufferManager:
+            // 由于 write buffer 满了触发
+            stats.memory_triggered_flush_count++;
+            stats.epoch_memory_triggered_flush_count++; 
+            break;
+        
+        // 2️⃣ 日志压力触发
+        case ROCKSDB_NAMESPACE::FlushReason::kWalFull:
+            stats.log_triggered_flush_count++;
+            stats.epoch_log_triggered_flush_count++;
+            if (memory_tuner_) {
+                memory_tuner_->notify_log_triggered_flush();
+            }
+            break;
+        
+        // 其他flush原因不计入论文模型中
+        default:
+            break;
+    }
 
     // 检查每一层是否需要Compaction，从L0开始向下遍历所有非空层
     int largest_level_idx = this->largest_occupied_level(db);
@@ -194,61 +220,61 @@ void Compactor::OnFlushCompleted(rocksdb::DB *db, const ROCKSDB_NAMESPACE::Flush
     // }
 }
 
-// ✅新增：OnCompactionCompleted
-void Compactor::OnCompactionCompleted(rocksdb::DB *db, const ROCKSDB_NAMESPACE::CompactionJobInfo &info)
-{
-    // ===== 记录 Compaction 统计 =====
-    stats.total_compaction_count++;
-    stats.epoch_compaction_count++;
+// ✅新增：OnCompactionCompleted 似乎不会自动回调 因为我们使用的是自定义的Compactor(完全禁用原生自动Compaction)
+// void Compactor::OnCompactionCompleted(rocksdb::DB *db, const ROCKSDB_NAMESPACE::CompactionJobInfo &info)
+// {
+//     // ===== 记录 Compaction 统计 =====
+//     stats.total_compaction_count++;
+//     stats.epoch_compaction_count++;
     
-    stats.total_input_files += info.input_files.size();
-    stats.epoch_input_files += info.input_files.size();
+//     stats.total_input_files += info.input_files.size();
+//     stats.epoch_input_files += info.input_files.size();
     
-    stats.total_output_files += info.output_files.size();
-    stats.epoch_output_files += info.output_files.size();
+//     stats.total_output_files += info.output_files.size();
+//     stats.epoch_output_files += info.output_files.size();
     
-    // 记录读写字节数
-    stats.total_compaction_read_bytes += info.stats.total_input_bytes;
-    stats.epoch_compaction_read_bytes += info.stats.total_input_bytes;
+//     // 记录读写字节数
+//     stats.total_compaction_read_bytes += info.stats.total_input_bytes;
+//     stats.epoch_compaction_read_bytes += info.stats.total_input_bytes;
     
-    stats.total_compaction_write_bytes += info.stats.total_output_bytes;
-    stats.epoch_compaction_write_bytes += info.stats.total_output_bytes;
+//     stats.total_compaction_write_bytes += info.stats.total_output_bytes;
+//     stats.epoch_compaction_write_bytes += info.stats.total_output_bytes;
     
-    // 记录时间
-    stats.total_compaction_time_us += info.stats.elapsed_micros;
-    stats.epoch_compaction_time_us += info.stats.elapsed_micros;
+//     // 记录时间
+//     stats.total_compaction_time_us += info.stats.elapsed_micros;
+//     stats.epoch_compaction_time_us += info.stats.elapsed_micros;
     
-    // 记录每层统计
-    if (info.output_level < CompactionStats::MAX_LEVELS) {
-        stats.compaction_count_per_level[info.output_level]++;
-    }
+//     // 记录每层统计
+//     if (info.output_level < CompactionStats::MAX_LEVELS) {
+//         stats.compaction_count_per_level[info.output_level]++;
+//     }
     
-    spdlog::debug("Compaction completed: L{} -> L{}, "
-                  "input_files={}, output_files={}, "
-                  "read_bytes={}, write_bytes={}, time={}us",
-                  info.base_input_level, info.output_level,
-                  info.input_files.size(), info.output_files.size(),
-                  info.stats.total_input_bytes, info.stats.total_output_bytes,
-                  info.stats.elapsed_micros);
+//     spdlog::debug("Compaction completed: L{} -> L{}, "
+//                   "input_files={}, output_files={}, "
+//                   "read_bytes={}, write_bytes={}, time={}us",
+//                   info.base_input_level, info.output_level,
+//                   info.input_files.size(), info.output_files.size(),
+//                   info.stats.total_input_bytes, info.stats.total_output_bytes,
+//                   info.stats.elapsed_micros);
     
-    // ===== 检查级联 Compaction =====
-    // Compaction 完成后，目标层可能超过容量阈值
-    // 需要检查是否触发新的 Compaction
+//     // ===== 检查级联 Compaction =====
+//     // Compaction 完成后，目标层可能超过容量阈值
+//     // 需要检查是否触发新的 Compaction
     
-    // 只检查从output_level开始的层（因为只有这些层可能受影响）
-    int largest_level_idx = this->largest_occupied_level(db);
+//     // 只检查从output_level开始的层（因为只有这些层可能受影响）
+//     int largest_level_idx = this->largest_occupied_level(db);
     
-    for (int level_idx = info.output_level; level_idx <= largest_level_idx; level_idx++)
-    {
-        CompactionTask *task = PickCompaction(db, info.cf_name, level_idx);
-        if (task != nullptr)
-        {
-            spdlog::debug("Cascade compaction triggered: L{} -> L{}",
-                          level_idx, task->output_level);
-            ScheduleCompaction(task);
-        }
-    }
-}
+//     for (int level_idx = info.output_level; level_idx <= largest_level_idx; level_idx++)
+//     {
+//         CompactionTask *task = PickCompaction(db, info.cf_name, level_idx);
+//         if (task != nullptr)
+//         {
+//             spdlog::debug("Cascade compaction triggered: L{} -> L{}",
+//                           level_idx, task->output_level);
+//             ScheduleCompaction(task);
+//         }
+//     }
+// }
 
 bool Compactor::requires_compaction(rocksdb::DB *db)
 {
