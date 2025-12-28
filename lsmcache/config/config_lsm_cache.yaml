@@ -12,6 +12,24 @@ app:
     KEY_FILE_PATH: "data/keys.data"
     LOG_FILE_PATH: "data/log_file.csv"
 
+# # test5所使用的新配置 
+lsm_tree_config: 
+    M: 838860800 # 总内存预算 100MB 100 * 2^20(1M) * 8(B) = 838860800 bits
+    N: 1000000  # entry 数量 100 万条记录 ≈ 1000MB 数据
+    Q: 10000000 # 查询数量 1000 万
+    phi: 1
+    s: 4 # range query selectivity
+    E: 8192    # bits/entry  1 KB 2^10(1K) * 8(B) = 8192 bits
+
+# test6使用的配置
+# lsm_tree_config:
+#     M: 268435456 # 总内存预算 32MB 32 * 2^20(1M) * 8(B) = 268435456 bits
+#     N: 100000  # entry 数量 10 万条记录 ≈ 100MB 数据
+#     Q: 1500000 # 查询数量 150 万
+#     phi: 1
+#     s: 4 # range query selectivity
+#     E: 8192    # bits/entry  1 KB 2^10(1K) * 8(B) = 8192 bits
+    
 # # 简易快速执行版
 # lsm_tree_config: 
 #     M: 134217728        # 2^27 bits ≈ 16MB 内存
@@ -22,13 +40,15 @@ app:
 #     E: 8192
 
 
-lsm_tree_config: 
-    M: 8589934592 # 总内存预算 1GB 2^30(1G) * 8(B) = 8589934592 bits
-    N: 10000000  # entry 数量 1000 万条记录 ≈ 10GB 数据
-    Q: 500000  # 查询数量 50 万查询
-    phi: 1
-    s: 4 # range query selectivity
-    E: 8192    # bits/entry  1 KB 2^10(1K) * 8(B) = 8192 bits
+
+# 旧的大配置
+# lsm_tree_config: 
+    # M: 8589934592 # 总内存预算 1GB 2^30(1G) * 8(B) = 8589934592 bits
+    # N: 10000000  # entry 数量 1000 万条记录 ≈ 10GB 数据 100000000
+    # Q: 500000  # 查询数量 50 万查询
+    # phi: 1
+    # s: 4 # range query selectivity
+    # E: 8192    # bits/entry  1 KB 2^10(1K) * 8(B) = 8192 bits
 
 
 jobs:

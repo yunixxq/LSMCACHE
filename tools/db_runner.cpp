@@ -325,6 +325,7 @@ int main(int argc, char *argv[])
     rocksdb_opt.disable_auto_compactions = true;
     rocksdb_opt.write_buffer_size = env.B;
     
+    spdlog::info("max_background_jobs(线程数): {}\n", env.parallelism);
     // rocksdb_opt.max_write_buffer_number = 2; // MemTable数量 默认是2
     // rocksdb_opt.max_bytes_for_level_multiplier = 10; // Size Ratio 默认是10
     // rocksdb_opt.target_file_size_base = 64 * 1024 * 1024; // L1 SST_size 默认是64MB
@@ -472,13 +473,6 @@ int main(int argc, char *argv[])
     {
         key_value = data_gen->gen_kv_pair(env.E); // 生成由[0, N-1]N个key组成的kv对
         db->Put(write_opt, key_value.first, key_value.second);
-
-        // 打印生成的kv对进行验证(前10个和后10个)
-        // if (entry_num < 10 || entry_num >= env.N - 10)
-        // {
-        //     spdlog::info("Insert[{}]: key='{}', value_size={}", 
-        //                 entry_num, key_value.first, key_value.second.size());
-        // }
     }
 
     // 等待初始化完成
@@ -509,6 +503,9 @@ int main(int argc, char *argv[])
     delete data_gen;
     data_gen = new YCSBGenerator(env.N, env.dist_mode, env.skew);
 
+    // data_gen2用于生成uniform的随机数值用于在写入时操作，确保正确的Compaction流程
+    DataGenerator *data_gen2 = new YCSBGenerator(env.N, "uniform", 0.0);
+
     ReadOptions read_options;
     read_options.total_order_seek = true;
     rocksdb::Iterator *it = db->NewIterator(read_options);
@@ -530,6 +527,7 @@ int main(int argc, char *argv[])
     size_t epoch_count = 0;
     size_t total_adjustments = 0;
 
+    // std::vector<std::string> write_keys;  // 收集所有写入的 key
     auto time_start = std::chrono::high_resolution_clock::now();
     
     // ==================== 主循环 ====================
@@ -573,8 +571,10 @@ int main(int argc, char *argv[])
         }
         case 3:
         {
-            key_value = data_gen->gen_existing_kv_pair(env.E);
+            // key_value = data_gen->gen_new_kv_pair(env.E);
+            key_value = data_gen2->gen_existing_kv_pair(env.E);
             db->Put(write_opt, key_value.first, key_value.second);
+            // write_keys.push_back(key_value.first);  // 添加这一行
             break;
         }
         default:
@@ -647,6 +647,12 @@ int main(int argc, char *argv[])
         }
     }
     delete it;
+
+    // spdlog::info("=== Write Keys Summary ===");
+    // spdlog::info("Total write operations: {}", write_keys.size());
+    // for (size_t i = 0; i < write_keys.size(); i++) {
+    //     spdlog::info("Write[{}]: key='{}'", i, write_keys[i]);
+    // }
 
     // ==================== Step 9: 等待后台操作完成 ====================
     spdlog::info("Waiting for background operations to complete...");

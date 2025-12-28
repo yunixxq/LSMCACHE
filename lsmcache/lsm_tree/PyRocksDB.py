@@ -10,8 +10,8 @@ import subprocess
 import numpy as np
 import time
 
-THREADS = 32
-
+# THREADS = 32
+THREADS = 4
 
 class RocksDB(object):
     """
