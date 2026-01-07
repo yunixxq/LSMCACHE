@@ -395,6 +395,7 @@ class RocksDB(object):
         proc = subprocess.Popen(
             cmd,
             stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
             universal_newlines=True,
             shell=True,
         )

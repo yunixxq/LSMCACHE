@@ -22,8 +22,16 @@
 #include "rocksdb/cache.h"
 #include "spdlog/spdlog.h"
 #include "tmpdb/compactor.hpp"
+#include "tmpdb/memory_tuner.hpp"
 
 namespace tmpdb {
+
+// 增加枚举类型设置 标记触发调优的原因
+enum class TuningTrigger {
+    NONE,
+    LOG_FLUSH,
+    TIME_BASED
+};
 
 class Compactor;
 
@@ -31,13 +39,11 @@ class Compactor;
 struct TuningCycleStats {
     // 基本统计
     size_t operations = 0;                 // op: 观察到的操作数
-    size_t total_writes = 0;               // 总写入操作数
-    size_t total_reads = 0;                // 总读取操作数
-    size_t total_range_queries = 0;        // 总范围查询数
     
     // I/O统计(pages)
     size_t total_merge_writes = 0;         // 总merge写入页数
     size_t total_merge_reads = 0;          // 总merge读取页数
+    size_t total_reads = 0;                // 总读取页面数
     size_t total_query_reads = 0;          // 查询读取页数
     size_t total_flush_writes = 0;         // flush写入页数
     
@@ -60,9 +66,7 @@ struct TuningCycleStats {
     
     void reset() {
         operations = 0;
-        total_writes = 0;
         total_reads = 0;
-        total_range_queries = 0;
         total_merge_writes = 0;
         total_merge_reads = 0;
         total_query_reads = 0;
@@ -148,8 +152,13 @@ public:
         log_flush_occurred_.store(true);
     }
 
-    bool should_tune();
-    
+    std::pair<bool, TuningTrigger> should_tune();
+
+    // ✅ 调优计时器重置方式
+    void reset_tuning_timer() {
+        last_tuning_time_ = std::chrono::steady_clock::now();
+        spdlog::debug("Tuning timer reset at workload start");
+    }
     
     size_t get_write_memory_size() const { return current_write_memory_; }
     
@@ -177,7 +186,7 @@ private:
     double estimate_write_cost_derivative(size_t write_memory);
     
     // 读成本导数(eq6): read'(x) = (saved_q + saved_m)/sim + write'(x)·read_m(x)/merge(x)
-    double estimate_read_cost_derivative(size_t write_memory, double write_derivative);
+    double estimate_read_cost_derivative(double write_derivative);
     
     // Newton-Raphson调优(返回值是建议的x值)
     size_t newton_raphson_step(size_t current_x, double current_derivative);
@@ -251,6 +260,7 @@ inline size_t estimate_lsm_levels(size_t data_size, size_t write_memory, double 
     return static_cast<size_t>(std::ceil(std::log(static_cast<double>(data_size) / write_memory) 
                                           / std::log(size_ratio)));
 }
+
 
 
 } // namespace tmpdb

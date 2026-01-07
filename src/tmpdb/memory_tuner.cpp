@@ -25,8 +25,8 @@ MemoryTuner::MemoryTuner(
     , block_cache_(block_cache)
     , statistics_(statistics)
     , sim_cache_(sim_cache)
-    , config_(config)
     , compactor_(compactor)
+    , config_(config)
     , current_write_memory_(config.initial_write_memory)
     , last_tuning_ops_(0)
     , tuning_count_(0)
@@ -48,8 +48,8 @@ MemoryTuner::MemoryTuner(
     // 初始化统计信息
     current_stats_.reset(); // 作为epoch起点，设置其start_time
     
-    // 初始化时间戳
-    last_tuning_time_ = std::chrono::steady_clock::now();
+    // // 初始化时间戳
+    // last_tuning_time_ = std::chrono::steady_clock::now();
 
     // 初始化所有快照信息
     init_prev_values();
@@ -114,13 +114,32 @@ bool MemoryTuner::tune() {
     
     // Step1: 收集统计信息
     collect_from_statistics();
+
+    // 在计算成本导数之前，输出收集到的原始统计数据
+    spdlog::info("Raw statistics collected:");
+    spdlog::info("  operations: {}", current_stats_.operations);
+    spdlog::info("  total_merge_writes: {} pages", current_stats_.total_merge_writes);
+    spdlog::info("  total_merge_reads: {} pages", current_stats_.total_merge_reads);
+    spdlog::info("  total_query_reads: {} pages", current_stats_.total_query_reads);
+    spdlog::info("  total_flush_writes: {} pages", current_stats_.total_flush_writes);
+    spdlog::info("  memory_triggered_flushes: {}", current_stats_.memory_triggered_flushes);
+    spdlog::info("  log_triggered_flushes: {}", current_stats_.log_triggered_flushes);
+    spdlog::info("  saved_query_reads: {:.6f} pages/op", current_stats_.saved_query_reads);
+    spdlog::info("  saved_merge_reads: {:.6f} pages/op", current_stats_.saved_merge_reads);
+
     
     // Step2: 计算成本导数(必须先写成本后读成本)
     // cost'(x) = ω·write'(x) + γ·read'(x)
     double write_derivative = estimate_write_cost_derivative(current_write_memory_);
-    double read_derivative = estimate_read_cost_derivative(current_write_memory_, write_derivative);
+    double read_derivative = estimate_read_cost_derivative(write_derivative);
     double cost_derivative = config_.write_weight * write_derivative + 
                          config_.read_weight * read_derivative;
+
+    // 新增：分别输出读写导数
+    spdlog::info("Cost derivatives at x={} MB:", current_write_memory_ / (1024 * 1024));
+    spdlog::info("  write'(x) = {:.6e} pages/(op·MB)", write_derivative);
+    spdlog::info("  read'(x)  = {:.6e} pages/(op·MB)", read_derivative);
+    spdlog::info("  cost'(x)  = {:.6e} pages/(op·MB)", cost_derivative);
 
     
     // Step3: 计算I/O成本 单位：pages/op      
@@ -133,10 +152,12 @@ bool MemoryTuner::tune() {
     double current_io_cost = config_.write_weight * write_cost + 
                          config_.read_weight * read_cost;    
 
+    spdlog::info("Cost at x={} MB:", current_write_memory_ / (1024 * 1024));
+    spdlog::info("  write(x) = {:.6e}", write_cost);
+    spdlog::info("  read(x)  = {:.6e}", read_cost);
+    spdlog::info("  cost(x)  = ω*{:.6e} + γ*{:.6e} = {:.6e}", 
+                 write_cost, read_cost, current_io_cost);
 
-    spdlog::info("Current I/O cost: {:.4f} pages/op", current_io_cost);
-    spdlog::info("Cost derivative at x={} MB: {:.2e}", 
-                 current_write_memory_ / (1024 * 1024), cost_derivative);
     
     // Step 4: 记录当前调优点
     TuningPoint current_point;
@@ -188,9 +209,9 @@ bool MemoryTuner::tune() {
 }
 
 // ✅ 判断是否应该执行调优(即结束一个epoch)
-bool MemoryTuner::should_tune() {
+std::pair<bool, TuningTrigger> MemoryTuner::should_tune() {
     if(has_converged_){
-        return false; 
+        return {false, TuningTrigger::NONE}; 
     }
 
     auto now = std::chrono::steady_clock::now();
@@ -204,24 +225,25 @@ bool MemoryTuner::should_tune() {
         if (log_flush_occurred_.load()) {
             log_flush_occurred_.store(false);
         }
-        return false;  // ← 直接拒绝，不调优
+
+        return {false, TuningTrigger::NONE}; // ← 直接拒绝，不调优
     }
 
-
+    // ✅只有在满足调优条件而实际触发调优时才需要更新last_tuning_time_时间
     // 条件1: log-triggered flush
     if (log_flush_occurred_.load()) {
         log_flush_occurred_.store(false); // 立即重置，等待下一次触发
         last_tuning_time_ = now;
-        return true;
+        return {true, TuningTrigger::LOG_FLUSH};
     }
     
     // 条件2: 时间兜底
     if (elapsed >= static_cast<long>(config_.tuning_interval_seconds)) {
         last_tuning_time_ = now;
-        return true;
+        return {true, TuningTrigger::TIME_BASED};
     }
     
-    return false;
+    return {false, TuningTrigger::NONE};
 }
 
 // ✅ 重置当前epoch统计信息，保留上一周期结束时候的统计信息
@@ -237,9 +259,9 @@ void MemoryTuner::reset_statistics() {
             rocksdb::BLOCK_CACHE_MISS,
             rocksdb::SIM_BLOCK_CACHE_HIT,   // 添加模拟缓存相关统计信息
             rocksdb::SIM_BLOCK_CACHE_MISS,
-            rocksdb::BLOCK_CACHE_DATA_MISS, // 用于估算磁盘查询读成本
-            rocksdb::BLOCK_CACHE_INDEX_MISS,
-            rocksdb::BLOCK_CACHE_FILTER_MISS,  
+            // rocksdb::BLOCK_CACHE_DATA_MISS, // 用于估算磁盘查询读成本
+            // rocksdb::BLOCK_CACHE_INDEX_MISS,
+            // rocksdb::BLOCK_CACHE_FILTER_MISS,  
             rocksdb::BLOOM_FILTER_USEFUL,
             rocksdb::BYTES_WRITTEN,
             rocksdb::BYTES_READ,
@@ -266,7 +288,6 @@ void MemoryTuner::reset_statistics() {
         compactor_->stats.reset_epoch();
     }
 
-    auto perf_ctx = rocksdb::get_perf_context();
 }
 
 void MemoryTuner::print_status() const {
@@ -284,8 +305,7 @@ void MemoryTuner::print_status() const {
     }
 }
 
-// ⚠️ 所有计算均考虑的是单个LSM-tree的情况，因此不要if else分情况考虑
-// ✅ 写成本导数估计
+// ✅ 写成本导数估计 修改12.30
 double MemoryTuner::estimate_write_cost_derivative(size_t write_memory) {
     // write'(x) = -merge(x) / x·ln(|LN|/(x)) · [flushmem / (flushmem + flushlog)]
 
@@ -293,6 +313,9 @@ double MemoryTuner::estimate_write_cost_derivative(size_t write_memory) {
         return -std::numeric_limits<double>::max();
     }
     
+    // ✅ 写内存转换为MB
+    double write_memory_mb = static_cast<double>(write_memory) / (1024.0 * 1024.0);
+
     // 1. 获取最后一层LN的大小 
     size_t last_level_size = 0;
     rocksdb::ColumnFamilyMetaData cf_meta;
@@ -306,8 +329,10 @@ double MemoryTuner::estimate_write_cost_derivative(size_t write_memory) {
         }
     }
 
+    double last_level_size_mb = static_cast<double>(last_level_size) / (1024.0 * 1024.0);
+
     // 2. 判断LN和x的关系，对数为0/负结果出错/没意义
-    if (last_level_size <= write_memory) {
+    if (last_level_size_mb <= write_memory_mb) {
         return 0.0;
     }
 
@@ -319,10 +344,18 @@ double MemoryTuner::estimate_write_cost_derivative(size_t write_memory) {
     }
 
     // 4. 计算导数主体部分
-    double ratio = static_cast<double>(last_level_size) / write_memory;
+    // double ratio = static_cast<double>(last_level_size) / write_memory;
+    double ratio = last_level_size_mb / write_memory_mb;
     double ln_ratio = std::log(ratio);
 
-    double derivative = -merge_pages_per_op / (write_memory * ln_ratio);
+    // 防止除以接近0的数
+    if (std::abs(ln_ratio) < 0.1) {  // 防止除以接近0的数
+        return 0.0;
+    }
+
+    // ✅ 导数单位: pages/(op·MB)
+    // double derivative = -merge_pages_per_op / (write_memory * ln_ratio);
+    double derivative = -merge_pages_per_op / (write_memory_mb * ln_ratio);
 
     // 5. 计算系数部分 flushmem / flushmem + flushlog
     double scale_factor = 1.0;
@@ -333,13 +366,22 @@ double MemoryTuner::estimate_write_cost_derivative(size_t write_memory) {
                       total_flush;
     }
 
+    spdlog::debug("Write derivative calculation:");
+    spdlog::debug("  merge_pages_per_op = {:.6f}", merge_pages_per_op);
+    spdlog::debug("  ratio = |LN|/x = {:.2f}", ratio);
+    spdlog::debug("  ln_ratio = {:.4f}", ln_ratio);
+    spdlog::debug("  raw_derivative = {:.6e}", derivative);
+    spdlog::debug("  scale_factor = {:.4f} (mem_flush={}, log_flush={})",
+                  scale_factor, current_stats_.memory_triggered_flushes,
+                  current_stats_.log_triggered_flushes);
+
     double result = derivative * scale_factor;
-    spdlog::debug("Write cost derivative: {:.2e}", result);
+    // spdlog::debug("Write cost derivative: {:.2e}", result);
     return result;
 }
 
 // ✅ 读成本导数估计
-double MemoryTuner::estimate_read_cost_derivative(size_t write_memory, double write_derivative) {
+double MemoryTuner::estimate_read_cost_derivative(double write_derivative) {
     // read'(x) = (saved_q + saved_m)/sim + write'(x) · read_m(x)/merge(x)
 
     // 使用SimCache(扩展128MB)后的模拟缓存可以节省的I/O统计
@@ -349,12 +391,15 @@ double MemoryTuner::estimate_read_cost_derivative(size_t write_memory, double wr
     saved_m = current_stats_.saved_merge_reads;
     
     // 第一项：(saved_q + saved_m) / sim
+    // ✅ 首先将sim_cache_size转换为MB 第一项单位: pages/(op·MB)
+    double sim_cache_mb = static_cast<double>(config_.sim_cache_size) / (1024.0 * 1024.0);
     double term1 = 0.0;
     if (config_.sim_cache_size > 0) {
-        term1 = (saved_q + saved_m) / static_cast<double>(config_.sim_cache_size);
+        // term1 = (saved_q + saved_m) / static_cast<double>(config_.sim_cache_size);
+        term1 = (saved_q + saved_m) / sim_cache_mb;
     }
     
-    // 第二项：write'(x) · read_m(x) / merge(x)
+    // 第二项：write'(x) · read_m(x) / merge(x) 其中的write_derivative已经是pages/(op·MB)了
     double term2 = 0.0;
     if (current_stats_.operations > 0 && current_stats_.total_merge_writes > 0) {
         double read_m_per_op = static_cast<double>(current_stats_.total_merge_reads) / 
@@ -385,8 +430,10 @@ bool MemoryTuner::fit_linear_model(double& A, double& B) {
     auto it = std::prev(tuning_history_.end(), n); // 指向倒数第n(3)个元素
     
     for (size_t i = 0; i < n; ++i, ++it) {
-        double x = static_cast<double>(it->write_memory_size);
-        double y = it->cost_derivative;
+        // ✅ 单位转换为 MB
+        // double x = static_cast<double>(it->write_memory_size);
+        double x = static_cast<double>(it->write_memory_size) / (1024.0 * 1024.0);
+        double y = it->cost_derivative; //单位已经是pages/(op·MB)
         
         sum_x += x;
         sum_y += y;
@@ -396,7 +443,12 @@ bool MemoryTuner::fit_linear_model(double& A, double& B) {
     
     double denom = n * sum_xx - sum_x * sum_x;
     
-    if (std::abs(denom) < 1e-20) {
+    // if (std::abs(denom) < 1e-20) {
+    //     return false;
+    // }
+    // ✅ 调整阈值，现在 x 是 MB 量级（几十到几千）
+    if (std::abs(denom) < 1e-6) {
+        spdlog::debug("Linear fit failed: denom={:.6e} too small", denom);
         return false;
     }
     
@@ -408,23 +460,32 @@ bool MemoryTuner::fit_linear_model(double& A, double& B) {
 }
 
 // ✅ Newton-Raphson调优实现 计算下一个写内存变量x的大小
+// ❗️当读写成本导数均转换为pages/op*MB的单位之后，我们的拟合调优也要更新为MB
 size_t MemoryTuner::newton_raphson_step(size_t current_x, double current_derivative) {
+    // 首先将当前写内存转换为MB
+    double current_x_mb = static_cast<double>(current_x) / (1024.0 * 1024.0);
+
     double A, B;
     
     // 尝试使用线性拟合 xi+1 = xi - cost'(xi) / A 
     if (fit_linear_model(A, B) && std::abs(A) > 1e-20) {
-        double step = current_derivative / A;
+        // double step = current_derivative / A;
+        double step_mb = current_derivative / A;
         
         // 检查变化幅度是否合理
-        if (std::isfinite(step) && std::abs(step) < config_.total_memory) {
-            double new_x_double = static_cast<double>(current_x) - step;
+        if (std::isfinite(step_mb) && std::abs(step_mb) < config_.total_memory) {
+            double new_x_mb = current_x_mb - step_mb;
+
             // 防止负数转size_t的未定义行为
-            if (new_x_double < 0) {
-                new_x_double = 0;
+            if (new_x_mb < 0) {
+                new_x_mb = 0;
             }
-            size_t new_x = static_cast<size_t>(new_x_double);
+            
+            // 再将其转换为bytes
+            size_t new_x = static_cast<size_t>(new_x_mb * 1024.0 * 1024.0);
+
             spdlog::debug("Newton-Raphson: x={} MB, derivative={:.2e}, A={:.2e}, step={:.0f} bytes",
-                          current_x / (1024 * 1024), current_derivative, A, step);
+                          current_x_mb / (1024 * 1024), current_derivative, A, step_mb);
             return new_x;
         }
     }
@@ -561,6 +622,8 @@ void MemoryTuner::resize_write_buffer(size_t new_size) {
         } else {
             spdlog::warn("Failed to set write buffer size: {}", s.ToString());
         }
+
+        compactor_->updateM(new_size);   // 更新compactor的配置
     }
 }
 
@@ -591,9 +654,17 @@ void MemoryTuner::collect_from_statistics() {
     uint64_t flush_write = get_delta(rocksdb::FLUSH_WRITE_BYTES);
     uint64_t cache_hits = get_delta(rocksdb::BLOCK_CACHE_HIT);
     uint64_t cache_misses = get_delta(rocksdb::BLOCK_CACHE_MISS);
-    uint64_t data_miss = get_delta(rocksdb::BLOCK_CACHE_DATA_MISS);
-    uint64_t index_miss = get_delta(rocksdb::BLOCK_CACHE_INDEX_MISS);
-    uint64_t filter_miss = get_delta(rocksdb::BLOCK_CACHE_FILTER_MISS);
+    // uint64_t data_miss = get_delta(rocksdb::BLOCK_CACHE_DATA_MISS);
+    // uint64_t index_miss = get_delta(rocksdb::BLOCK_CACHE_INDEX_MISS);
+    // uint64_t filter_miss = get_delta(rocksdb::BLOCK_CACHE_FILTER_MISS);
+
+    spdlog::info("I/O Collection Result: compact_read={}, compact_write={}, flush_write={}, "
+                  "cache_hits={}, cache_misses={}",
+                  compact_read,
+                  compact_write,
+                  flush_write,
+                  cache_hits,
+                  cache_misses);
 
     // 总的读写Bytes / 每个page的Bytes =  (单位)读写的pages/blocks 
     current_stats_.total_merge_writes = compact_write / config_.page_size;
@@ -601,7 +672,7 @@ void MemoryTuner::collect_from_statistics() {
     current_stats_.total_merge_reads = compact_read / config_.page_size;
     current_stats_.total_query_reads = query_read_bytes / config_.page_size;
     current_stats_.total_reads = current_stats_.total_query_reads + current_stats_.total_merge_reads;
-
+    
     // 2.验证操作数(由外部通过record_operation记录)
     if (current_stats_.operations == 0) {
         spdlog::warn("operations is 0, this may indicate record_operation() was not called");
@@ -620,13 +691,18 @@ void MemoryTuner::collect_from_statistics() {
     if(sim_cache_){
         uint64_t delta_sim_hits = get_delta(rocksdb::SIM_BLOCK_CACHE_HIT);
         uint64_t delta_actual_hits = cache_hits;  // 复用上面已计算的值
-        
+
         // saved_hits (单位：pages)
         int64_t saved_hits = static_cast<int64_t>(delta_sim_hits) - 
                              static_cast<int64_t>(delta_actual_hits);
         if (saved_hits < 0) {
             saved_hits = 0;
         }
+        
+        // ✅ 通过输出确认两个值之间的关系
+        spdlog::debug("SimCache stats: sim_hits={}, actual_hits={}, saved={}",
+              delta_sim_hits, delta_actual_hits, saved_hits);
+
         // 计算saved/op (单位pages/op)
         if (current_stats_.operations > 0 && saved_hits > 0 && current_stats_.total_reads > 0) {
             // 先计算总数
@@ -651,7 +727,7 @@ void MemoryTuner::collect_from_statistics() {
     }
 
     current_stats_.end_time = std::chrono::steady_clock::now();
-    spdlog::debug("Statistics collected: ops={}, merge_writes={}, merge_reads={}, "
+    spdlog::info("Statistics collected: ops={}, merge_writes={}, merge_reads={}, "
                   "saved_q={:.4f}, saved_m={:.4f}",
                   current_stats_.operations,
                   current_stats_.total_merge_writes,

@@ -275,9 +275,9 @@ void print_final_statistics(rocksdb::DB *db,
     spdlog::info("=== Compactor Statistics ===");
     spdlog::info("total_flush_count: {}", compactor->stats.total_flush_count.load());
     spdlog::info("total_compaction_count: {}", compactor->stats.total_compaction_count.load());
-    spdlog::info("total_compaction_input_files: {}", compactor->stats.total_input_files.load());
-    spdlog::info("total_compaction_read_bytes: {}", compactor->stats.total_compaction_read_bytes.load());
-    spdlog::info("total_compaction_write_bytes: {}", compactor->stats.total_compaction_write_bytes.load());
+    // spdlog::info("total_compaction_input_files: {}", compactor->stats.total_input_files.load());
+    // spdlog::info("total_compaction_read_bytes: {}", compactor->stats.total_compaction_read_bytes.load());
+    // spdlog::info("total_compaction_write_bytes: {}", compactor->stats.total_compaction_write_bytes.load());
 }
 
 int main(int argc, char *argv[])

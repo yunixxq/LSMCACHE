@@ -55,8 +55,7 @@ class Optimizer(object):
             row["z1"] = z1
             row["q"] = q
             row["w"] = w
-            # row["initial_write_memory"] = 67108864 # 64M 单位:bytes
-            row["initial_write_memory"] = 16777216 # 16MB 单位:bytes
+            row["initial_write_memory"] = 67108864 # 64MB 单位:bytes
             self.logger.info(f'Building DB at size: {row["N"]}')
 
             db = RocksDB(self.config)

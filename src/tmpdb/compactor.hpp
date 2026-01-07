@@ -71,33 +71,23 @@ namespace tmpdb
         // Flush 统计 
         std::atomic<uint64_t> total_flush_count{0};
         std::atomic<uint64_t> epoch_flush_count{0};
-        
+
         // Flush分类统计
-        std::atomic<uint64_t> memory_triggered_flush_count{0};
+        std::atomic<uint64_t> total_memory_triggered_flush_count{0};
         std::atomic<uint64_t> epoch_memory_triggered_flush_count{0};
-        std::atomic<uint64_t> log_triggered_flush_count{0};
+        std::atomic<uint64_t> total_log_triggered_flush_count{0};
         std::atomic<uint64_t> epoch_log_triggered_flush_count{0};
 
-        // Compaction 计数 
+        // Compaction 计数
         std::atomic<uint64_t> total_compaction_count{0};
         std::atomic<uint64_t> epoch_compaction_count{0};
 
-        // 文件统计 
-        std::atomic<uint64_t> total_input_files{0};
-        std::atomic<uint64_t> epoch_input_files{0};
-        std::atomic<uint64_t> total_output_files{0};
-        std::atomic<uint64_t> epoch_output_files{0};
-        
-        // 字节统计
-        std::atomic<uint64_t> total_compaction_read_bytes{0};
-        std::atomic<uint64_t> epoch_compaction_read_bytes{0};
-        std::atomic<uint64_t> total_compaction_write_bytes{0};
-        std::atomic<uint64_t> epoch_compaction_write_bytes{0};
-        
-        // 时间统计
-        std::atomic<uint64_t> total_compaction_time_us{0};
-        std::atomic<uint64_t> epoch_compaction_time_us{0};
-        
+        // Compaction文件统计 用于五阶段链条验证
+        std::atomic<uint64_t> total_sst_files_invalidation{0};
+        std::atomic<uint64_t> epoch_sst_files_invalidation{0};
+        // std::atomic<uint64_t> total_sst_bytes_deleted{0};
+        // std::atomic<uint64_t> epoch_sst_bytes_deleted{0};
+
         // 每层统计
         static constexpr int MAX_LEVELS = 16;
         std::atomic<uint64_t> compaction_count_per_level[MAX_LEVELS] = {};
@@ -115,11 +105,9 @@ namespace tmpdb
             epoch_memory_triggered_flush_count = 0; // ✅ 用于Breaking Walls Write Cost系数
             epoch_log_triggered_flush_count = 0;
             epoch_compaction_count = 0;
-            epoch_input_files = 0;
-            epoch_output_files = 0;
-            epoch_compaction_read_bytes = 0;
-            epoch_compaction_write_bytes = 0;
-            epoch_compaction_time_us = 0;
+            epoch_sst_files_invalidation = 0;
+            // epoch_input_files = 0;
+            // epoch_output_files = 0;
             epoch_start_time = std::chrono::steady_clock::now();
         }
         

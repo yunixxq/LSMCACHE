@@ -52,12 +52,12 @@ typedef struct environment
     size_t initial_write_memory = 64 * 1024 * 1024; // 初始写内存大小
     
     // ===== Memory Tuner配置（论文Breaking Walls） =====
-    bool enable_memory_tuner = false;   // 是否启用Memory Tuner
+    bool enable_memory_tuner = true;   // 默认情况下启用Memory Tuner
     double write_weight = 1.0;          // ω: 写成本权重 默认均为1
     double read_weight = 1.0;           // γ: 读成本权重
     size_t sim_cache_size = 128 * 1024 * 1024;  // SimCache大小 128M 单位:bytes
-    size_t tuning_interval_seconds = 600;       // 调优间隔（秒）
-    size_t min_tuning_interval_seconds = 60;    // 最小调优间隔
+    size_t tuning_interval_seconds = 180;       // 调优间隔（秒）
+    size_t min_tuning_interval_seconds = 20;    // 最小调优间隔
               
     // 其他配置
     int verbose = 0;
@@ -293,6 +293,8 @@ int main(int argc, char *argv[])
     rocksdb_opt.use_direct_io_for_flush_and_compaction = true;
     rocksdb_opt.compaction_style = rocksdb::kCompactionStyleNone;
     rocksdb_opt.disable_auto_compactions = true;
+    rocksdb_opt.max_total_wal_size = 128 * 1024 * 1024; // 128MB
+    rocksdb_opt.max_bytes_for_level_multiplier = 5;  // 增加Compaction的数量
 
     // 写日志长度: rocksdb_opt.max_log_file_size
 
@@ -480,6 +482,7 @@ int main(int argc, char *argv[])
     // 重置Memory Tuner统计
     if (memory_tuner) {
         memory_tuner->reset_statistics();
+        memory_tuner->reset_tuning_timer(); // 显式设置调优起点 / 而非初始注入数据时
     }
 
     // ==================== Step 8: 执行 Workload ====================
@@ -492,6 +495,9 @@ int main(int argc, char *argv[])
     std::string value, key, limit;
     delete data_gen;
     data_gen = new YCSBGenerator(env.N, env.dist_mode, env.skew);
+
+    // data_gen2用于生成uniform的随机数值用于在写入时操作，确保正确的Compaction流程
+    DataGenerator *data_gen2 = new YCSBGenerator(env.N, "uniform", 0.0);
 
     ReadOptions read_options;
     read_options.total_order_seek = true;
@@ -512,7 +518,9 @@ int main(int argc, char *argv[])
     size_t total_adjustments = 0;
 
     auto time_start = std::chrono::high_resolution_clock::now();
-    
+
+    int read_ops = 0;
+    int write_ops = 0;
     // ==================== 主循环 ====================
     for (size_t i = 0; i < env.queries; i++)
     {
@@ -539,6 +547,7 @@ int main(int argc, char *argv[])
             {
                 key = data_gen->gen_existing_key();
                 status = db->Get(read_options, key, &value);
+                read_ops = read_ops + 1;
                 break;
             }
             case 2:  // Range read
@@ -555,8 +564,11 @@ int main(int argc, char *argv[])
             }
             case 3:  // Write
             {
-                key_value = data_gen->gen_existing_kv_pair(env.E);
+                // key_value = data_gen->gen_existing_kv_pair(env.E);
+                key_value = data_gen2->gen_existing_kv_pair(env.E);  
+                // ✅ 确保Compaction正常，而不是在Memtable中就因为zipfian大量被去重
                 db->Put(write_opt, key_value.first, key_value.second);
+                write_ops = write_ops + 1;
                 break;
             }
             default:
@@ -568,12 +580,31 @@ int main(int argc, char *argv[])
         }
         
         // ===== Memory Tuner调优检查 =====
-        if (memory_tuner && memory_tuner->should_tune())
+        auto tune_states = memory_tuner->should_tune();
+        if (memory_tuner && tune_states.first)
         {
             tuning_count++;
-            spdlog::info("--- Memory Tuning Cycle {} (step {}/{}) ---", 
-                         tuning_count, i + 1, env.queries);
+
+            // 显示触发原因
+            std::string trigger_str;
+            switch (tune_states.second) {
+                case tmpdb::TuningTrigger::LOG_FLUSH:
+                    trigger_str = "LOG_FLUSH";
+                    break;
+                case tmpdb::TuningTrigger::TIME_BASED:
+                    trigger_str = "TIME_BASED";
+                    break;
+                default:
+                    trigger_str = "UNKNOWN";
+            }
+
+            spdlog::info("--- Memory Tuning Cycle {} (step {}/{}) read_ops = {} write_ops = {} [Trigger: {}] ---", 
+                     tuning_count, i + 1, env.queries, read_ops, write_ops, trigger_str);
             
+            // 将操作统计置0
+            read_ops = 0;
+            write_ops = 0;
+
             // 执行调优
             bool adjusted = memory_tuner->tune();
             
@@ -585,8 +616,12 @@ int main(int argc, char *argv[])
                 spdlog::info("  Buffer cache: {} MB", 
                              memory_tuner->get_buffer_cache_size() / (1024 * 1024));
                 
-                // 更新Compactor的buffer_size配置
-                compactor->updateM(memory_tuner->get_write_memory_size());
+                // // 更新Compactor的buffer_size配置
+                // compactor->updateM(memory_tuner->get_write_memory_size());
+                // 我们在Memory Tuner中更新了这一部分，因此我们在这里检查一下是否正确
+                if(compactor->compactor_opt.buffer_size == memory_tuner->get_write_memory_size()){
+                    spdlog::info("Compactor中实现了buffer size的同步调整");
+                }
             }
         }
     }
@@ -619,6 +654,8 @@ int main(int argc, char *argv[])
     db->Close();
     delete db;
     delete data_gen;
+    delete data_gen2;  // 新增的记得清理！
+
     delete memory_tuner;
 
     spdlog::info("=== Execution Completed ===");

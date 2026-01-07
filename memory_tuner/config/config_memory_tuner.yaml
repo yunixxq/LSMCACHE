@@ -10,12 +10,12 @@ app:
 
 lsm_tree_config:
   E: 1024         # 1KB bytes/entry
-  M: 4294967296   # 4GB bytes  M: 21474836480  # 20GB
-  # M: 104857600  # 100MB 单位:bytes 
-  N: 10000000     # 初始化 entry 数量1000万条记录 ～ 10GB
-  Q: 10000000     # 查询数量1000万 
+  # M: 2147483648   # 2GB bytes
+  M: 1073741824 # 1GB bytes
+  N: 10000000      # 初始化entry数量1000万条记录 ～ 10GB
+  Q: 100000000      # 查询数量10000万(1亿)
   s: 4            # range query selectivity
-  T: 10
+  T: 5
   h: 5
 
 

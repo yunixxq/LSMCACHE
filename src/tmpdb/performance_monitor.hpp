@@ -140,7 +140,7 @@ public:
         if (compactor_) {
             m.epoch_flush_count = compactor_->stats.epoch_flush_count;
             m.epoch_compaction_count = compactor_->stats.epoch_compaction_count;
-            m.epoch_compaction_input_files = compactor_->stats.epoch_input_files;
+            // m.epoch_compaction_input_files = compactor_->stats.epoch_input_files;
             // m.epoch_compaction_read_bytes = compactor_->stats.epoch_compaction_read_bytes;
             // m.epoch_compaction_write_bytes = compactor_->stats.epoch_compaction_write_bytes;
             
