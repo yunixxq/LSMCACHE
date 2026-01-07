@@ -46,6 +46,7 @@ ExternalProject_Add(rocksdb_static_lib
     SOURCE_DIR "${PROJECT_SOURCE_DIR}/extern/rocksdb"
     INSTALL_COMMAND ""
     CONFIGURE_COMMAND ""
+    BUILD_ALWAYS 1
     USES_TERMINAL_CONFIGURE 1
     BUILD_COMMAND $(MAKE) -C ${PROJECT_SOURCE_DIR}/extern/rocksdb DISABLE_WARNING_AS_ERROR=true static_lib
 )
@@ -64,7 +65,9 @@ find_package(LZ4 REQUIRED)
 find_package(Threads REQUIRED)
 find_package(zstd REQUIRED)
 find_package(snappy REQUIRED)
+find_package(fmt REQUIRED)
 target_link_libraries(rocksdb INTERFACE
+    fmt::fmt
     BZip2::BZip2
     LZ4::LZ4
     Threads::Threads
@@ -145,6 +148,9 @@ target_link_libraries(db_runner_dynamic tmpdb tools)
 
 add_executable(db_runner_with_tuner ${CMAKE_SOURCE_DIR}/tools/db_runner_with_tuner.cpp)
 target_link_libraries(db_runner_with_tuner tmpdb tools)
+
+add_executable(db_runner_motivating ${CMAKE_SOURCE_DIR}/tools/db_runner_motivating.cpp)
+target_link_libraries(db_runner_motivating tmpdb tools)
 
 add_executable(key_gen ${CMAKE_SOURCE_DIR}/tools/key_gen.cpp)
 target_link_libraries(key_gen tmpdb tools)

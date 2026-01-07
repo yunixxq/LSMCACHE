@@ -602,6 +602,9 @@ Status BlockBasedTable::Open(
   // handle to null, otherwise it may be seen as uninitialized during the below
   // meta-block reads.
   rep->compression_dict_handle = BlockHandle::NullBlockHandle();
+  
+  rep->file_number = cur_file_num; // 保存SST文件编号
+  rep->file_cache_tracker = table_options.file_cache_tracker;   // ✅增加文件缓存跟踪
 
   // Read metaindex
   std::unique_ptr<Block> metaindex;
@@ -1308,7 +1311,17 @@ Status BlockBasedTable::PutDataBlockToCache(
       assert(cache_handle != nullptr);
       cached_block->SetCachedValue(block_holder.release(), block_cache,
                                    cache_handle);
-
+      // 新增：file_number追踪
+      if (rep_->file_cache_tracker != nullptr) {
+        // file_number 在这里是已知的！
+        uint64_t file_number = rep_->file_number;
+        rep_->file_cache_tracker->TrackEntry(
+                file_number,
+                block_cache_key,
+                charge // ✅ 直接使用前面已经计算好的内容
+            );
+      }
+      
       UpdateCacheInsertionMetrics(block_type, get_context, charge,
                                   s.IsOkOverwritten(), rep_->ioptions.stats);
     } else {
@@ -1395,7 +1408,7 @@ IndexBlockIter* BlockBasedTable::InitBlockIterator<IndexBlockIter>(
 // If contents is non-null, it skips the cache lookup and disk read, since
 // the caller has already read it. In both cases, if ro.fill_cache is true,
 // it inserts the block into the block cache.
-template <typename TBlocklike>
+template <typename TBlocklike> // ✅下面这个函数很重要
 Status BlockBasedTable::MaybeReadBlockAndLoadToCache(
     FilePrefetchBuffer* prefetch_buffer, const ReadOptions& ro,
     const BlockHandle& handle, const UncompressionDict& uncompression_dict,

@@ -21,7 +21,12 @@ tmux attach -t lsmacache
 # 直接kill指定会话
 tmux kill-session -t lsmacache
 # 在tmux会话中使用快捷键 
-exit 
+exit  # ✅✅✅ 使用这个方式正常退出
+
+sudo lsof +L1 /data
+du -h --max-depth=1 /data
+df -h
+
 
 # 重定向标准输出和标准错误（全部输出）
 python script.py > /home/ubuntu/projects/LSMCACHE/data/output.txt 2>&1
@@ -30,3 +35,6 @@ python script.py > /home/ubuntu/projects/LSMCACHE/data/output.txt 2>&1
 python3 /home/ubuntu/projects/LSMCACHE/lsmcache/sampling/lsmwrite_cache_xgb.py  > /home/ubuntu/projects/LSMCACHE/data/output.txt 2>&1
 python3 /home/ubuntu/projects/LSMCACHE/lsmcache/train/lsmwrite_cache_cost_xgb.py > /home/ubuntu/projects/LSMCACHE/data/output.txt 2>&1
 python3 /home/ubuntu/projects/LSMCACHE/lsmcache/optimizer/lsmwrite_cache_xgb_optimizer.py > /home/ubuntu/projects/LSMCACHE/data/output.txt 2>&1
+
+python3 memory_tuner/main.py > data/output.txt 2>&1
+python3 motivating_exp/main.py > data/output.txt 2>&1

@@ -2026,6 +2026,43 @@ void CompactionJob::CleanupCompaction() {
     // intentional. So ignoring the io_status as of now.
     sub_compact.io_status.PermitUncheckedError();
   }
+
+  // 失效被删除的Block Cache条目
+  auto* cfd = compact_->compaction->column_family_data();
+  const auto* ioptions = cfd->ioptions();
+  auto* table_factory = ioptions->table_factory.get();
+
+  if (table_factory != nullptr) {
+    const auto* bbto = table_factory->GetOptions<BlockBasedTableOptions>();
+
+    if (bbto != nullptr && 
+        bbto->block_cache != nullptr &&
+        bbto->file_cache_tracker != nullptr) {
+        
+      // 收集被删除的输入文件
+      std::vector<uint64_t> deleted_file_numbers;
+      
+      // ★ 修正：使用正确的API遍历输入文件
+      for (size_t lvl = 0; lvl < compact_->compaction->num_input_levels(); ++lvl) {
+        size_t num_files = compact_->compaction->num_input_files(lvl);
+        for (size_t i = 0; i < num_files; ++i) {
+          const FileMetaData* f = compact_->compaction->input(lvl, i);
+          if (f != nullptr) {
+            deleted_file_numbers.push_back(f->fd.GetNumber());
+          }
+        }
+      }
+      
+      // 调用失效
+      if (!deleted_file_numbers.empty()) {
+        size_t invalidated = bbto->file_cache_tracker->InvalidateFiles(
+            deleted_file_numbers,
+            bbto->block_cache.get()
+        );
+      }
+    }  // ← if (bbto != nullptr && ...) 的右括号
+  } // ← if (table_factory != nullptr) 的右括号
+
   delete compact_;
   compact_ = nullptr;
 }

@@ -26,6 +26,7 @@
 #include "rocksdb/env.h"
 #include "rocksdb/options.h"
 #include "rocksdb/status.h"
+#include "rocksdb/file_cache_tracker.h"
 
 namespace ROCKSDB_NAMESPACE {
 
@@ -43,6 +44,7 @@ class TableReader;
 class WritableFileWriter;
 struct ConfigOptions;
 struct EnvOptions;
+class FileCacheTracker;  // ✅增加前向声明
 
 enum ChecksumType : char {
   kNoChecksum = 0x0,
@@ -109,6 +111,9 @@ struct BlockBasedTableOptions {
   // block flush policy, which cut blocks by block size (please refer to
   // `FlushBlockBySizePolicy`).
   std::shared_ptr<FlushBlockPolicyFactory> flush_block_policy_factory;
+
+  // ✅ 增加文件缓存跟踪器
+  std::shared_ptr<FileCacheTracker> file_cache_tracker = nullptr;
 
   // TODO(kailiu) Temporarily disable this feature by making the default value
   // to be false.

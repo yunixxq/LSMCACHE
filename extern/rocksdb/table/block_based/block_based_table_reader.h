@@ -19,6 +19,7 @@
 #include "table/table_properties_internal.h"
 #include "table/table_reader.h"
 #include "table/two_level_iterator.h"
+#include "rocksdb/file_cache_tracker.h"
 
 #include "trace_replay/block_cache_tracer.h"
 
@@ -580,6 +581,8 @@ struct BlockBasedTable::Rep {
   BlockHandle compression_dict_handle;
 
   std::shared_ptr<const TableProperties> table_properties;
+  uint64_t file_number = 0; // SST文件编号
+  std::shared_ptr<FileCacheTracker> file_cache_tracker;  // ✅文件缓存跟踪器
   BlockBasedTableOptions::IndexType index_type;
   bool hash_index_allow_collision;
   bool whole_key_filtering;

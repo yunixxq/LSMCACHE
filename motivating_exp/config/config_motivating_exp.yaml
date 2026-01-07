@@ -1,0 +1,94 @@
+# ============================================================
+# Motivating Experiment Configuration
+# 五阶段耦合模型验证实验
+# ============================================================
+
+app:
+    app_name: "motivating_exp"
+    app_logging_level: "INFO"
+    
+    ROOT_DIR: "motivating_exp"
+    DATA_DIR: "data"
+    
+    # ✅ 指向编译好的 motivating experiment 可执行文件
+    EXECUTION_PATH: "build/db_runner_motivating"
+    DATABASE_PATH: "/data"
+
+# ============================================================
+# LSM-Tree 配置
+# ============================================================
+# lsm_tree_config:
+#     E: 1024              # Entry size: 1KB bytes/entry
+#     M: 1073741824        # Total memory: 1GB bytes (可调整为 4GB = 4294967296)
+#     N: 10000000          # 初始化 entry 数量: 1000万条记录 (~10GB 数据)
+#     Q: 10000000          # 查询数量: 1000万 (每个 alpha 值)
+#     s: 4                 # Range query selectivity
+#     T: 5                 # Size ratio
+#     h: 5                 # Bloom filter bits per element
+
+lsm_tree_config:
+    M: 33554432 # 总内存预算 32MB 32 * 2^20(1M)
+    N: 100000  # entry 数量 10 万条记录 ≈ 100MB 数据
+    Q: 1500000 # 查询数量 150 万
+    s: 4 # range query selectivity
+    E: 1024    # bits/entry  1 KB
+    T: 5                 # Size ratio
+    h: 5                 # Bloom filter bits per element
+
+# ============================================================
+# Alpha 扫描配置
+# α = Mbuf / M (写内存占总内存的比例)
+# ============================================================
+alpha_sweep:
+    start: 0.05          # Alpha 起始值 (5%)
+    end: 0.95            # Alpha 结束值 (95%)
+    step: 0.05           # Alpha 步长 (5%)
+    # 总共扫描: (0.95 - 0.05) / 0.05 + 1 = 19 个点
+
+# ============================================================
+# 工作负载配置
+# ============================================================
+workload:
+    dist: "zipfian"      # 访问分布: uniform / zipfian
+    skew: 0.99           # Zipfian skewness (越大越倾斜)
+    
+    # 默认工作负载比例 (在 main.py 中可覆盖)
+    # empty_reads: 0.00
+    # non_empty_reads: 0.50
+    # range_reads: 0.00
+    # writes: 0.50
+
+# ============================================================
+# 输出路径
+# ============================================================
+optimizer_path:
+    # C++ 程序输出的 CSV 文件
+    motivating_exp_output: "data/motivating_exp_results.csv"
+    
+    # Python 脚本的检查点和最终结果
+    motivating_exp_ckpt: "data/motivating_exp_ckpt.csv"
+    motivating_exp_final: "data/motivating_exp_final.csv"
+
+# ============================================================
+# 实验参数说明
+# ============================================================
+# 
+# 五阶段耦合模型:
+#   Stage 0:  α → Mbuf (写内存大小)
+#   Stage 0': α → Mcache (块缓存大小)
+#   Stage 1:  Mbuf → Flush 频率
+#   Stage 2:  Flush → Compaction 频率
+#   Stage 3:  Compaction → SST 文件失效
+#   Stage 4:  SST 失效 → Cache 条目失效
+#   Stage 5:  失效 → H_cache (实际命中率)
+#
+# 测量指标:
+#   H_cap:   容量命中率 (纯读工作负载，无 Compaction 干扰)
+#   H_cache: 实际命中率 (混合读写工作负载)
+#   H_val:   有效性命中率 = H_cache / H_cap
+#
+# 验证目标:
+#   H_cache(α) = H_cap(α) × H_val(α) 存在内部最优解 α*
+#   即 H_cache 关于 α 是非单调的
+#
+# ============================================================
