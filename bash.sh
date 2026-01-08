@@ -39,4 +39,5 @@ python3 /home/ubuntu/projects/LSMCACHE/lsmcache/optimizer/lsmwrite_cache_xgb_opt
 python3 memory_tuner/main.py > data/output.txt 2>&1
 python3 motivating_exp/main.py > data/output.txt 2>&1
 
-# test
+rm -rf /data/motivating_exp_alpha_*
+rm -rf /mnt/essd/wal_alpha_*
