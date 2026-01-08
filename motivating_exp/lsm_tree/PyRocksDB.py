@@ -8,7 +8,7 @@ import time
 from typing import Dict, Optional, Any, List
 from dataclasses import dataclass, field
 
-THREADS = 4
+THREADS = 8
 
 class RocksDB(object):
     """
@@ -220,11 +220,11 @@ class RocksDB(object):
         self.M = int(M)
         self.h = int(h)
         
-        # 输出参数日志
-        self._log_run_params(
-            db_dir, num_z0, num_z1, num_q, num_w, queries,
-            sel, dist, skew, alpha_start, alpha_end, alpha_step
-        )
+        # # 输出参数日志
+        # self._log_run_params(
+        #     db_dir, num_z0, num_z1, num_q, num_w, queries,
+        #     sel, dist, skew, alpha_start, alpha_end, alpha_step
+        # )
         
         # 构建执行命令
         cmd = [
@@ -259,8 +259,10 @@ class RocksDB(object):
         # 执行命令
         proc = subprocess.Popen(
             cmd_str,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
+            # stdout=subprocess.PIPE,
+            # stderr=subprocess.STDOUT,
+            stdout=None,  # None 表示继承父进程的 stdout
+            stderr=None,  # None 表示继承父进程的 stderr
             universal_newlines=True,
             shell=True,
         )
@@ -281,6 +283,6 @@ class RocksDB(object):
             return self._get_default_results()
         
         # 解析结果
-        results = self._parse_results(proc_results)
+        # results = self._parse_results(proc_results)
         
-        return results
+        # return results

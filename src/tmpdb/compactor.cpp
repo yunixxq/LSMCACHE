@@ -248,9 +248,9 @@ void Compactor::CompactFiles(void *arg)
     assert(task->db);
     assert(task->output_level > (int)task->origin_level_id);
 
-    spdlog::info("CompactFiles starting: L{} -> L{}, files={}",
-                  task->origin_level_id, task->output_level,
-                  task->input_file_names.size());
+    // spdlog::info("CompactFiles starting: L{} -> L{}, files={}",
+    //               task->origin_level_id, task->output_level,
+    //               task->input_file_names.size());
     
     // auto start_time = std::chrono::steady_clock::now();
     // 实际执行Compaction：RocksDB内部接口，合并多个SST文件到目标层
@@ -292,8 +292,8 @@ void Compactor::CompactFiles(void *arg)
                 
             if (cascade_task != nullptr)
             {
-                spdlog::info("Cascade compaction triggered: L{} -> L{}",
-                              level_idx, cascade_task->output_level);
+                // spdlog::info("Cascade compaction triggered: L{} -> L{}",
+                //               level_idx, cascade_task->output_level);
                 compactor->ScheduleCompaction(cascade_task);
             }
         }

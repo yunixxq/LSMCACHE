@@ -2,7 +2,6 @@
 #include <iostream>
 #include <fstream>
 #include <ctime>
-#include <filesystem>
 #include <unistd.h>
 #include <algorithm>
 #include <iomanip>
@@ -25,6 +24,7 @@
 #include "tmpdb/compactor.hpp"
 #include "infrastructure/data_generator.hpp"
 #include "tmpdb/memory_tuner.hpp"
+#include "tmpdb/progress_bar.hpp"
 
 using namespace ROCKSDB_NAMESPACE;
 
@@ -64,12 +64,6 @@ struct MotivatingExpResult
     double H_val;               // ✅ 有效性命中率 (计算得出) H_val = H_cache / H_cap
     double H_cache;             // 总命中率 (混合读写测量)
 
-    // 各种时间统计
-    size_t initial_latency_ms;
-    size_t read_only_latency_ms;
-    size_t mixed_workload_latency_ms; 
-
-    
     // I/O 成本 (KB/op)
     double write_io_kb_per_op;
     double read_io_kb_per_op;
@@ -127,20 +121,20 @@ typedef struct environment
     size_t M = 0;                                    // 总内存预算
     size_t initial_write_memory = 64 * 1024 * 1024; // 初始写内存大小
     
-    // ===== Memory Tuner配置（论文Breaking Walls） =====
+    // Memory Tuner配置
     bool enable_memory_tuner = true;
     double write_weight = 1.0;
     double read_weight = 1.0;
     size_t sim_cache_size = 128 * 1024 * 1024;
     size_t tuning_interval_seconds = 180;
     size_t min_tuning_interval_seconds = 20;
-    
-    // ===== ✅ Motivating Experiment 配置 =====
+
+    // Motivating Experiment 配置
     bool motivating_exp_mode = false;       // 是否启用 Motivating Experiment 模式
     double alpha_start = 0.05;              // Alpha 扫描起始值
     double alpha_end = 0.95;                // Alpha 扫描结束值
     double alpha_step = 0.05;               // Alpha 扫描步长
-    std::string exp_output_file = "motivating_exp_results.csv";  // 实验输出文件
+    std::string exp_output_file = "/data/motivating_exp_results.csv";  // 实验输出文件
               
     // 其他配置
     int verbose = 0;
@@ -337,6 +331,20 @@ void print_final_statistics(rocksdb::DB *db,
              write_cost_kb_per_op, read_cost_kb_per_op, total_io_cost_kb_per_op);
 }
 
+void reset_all_statistics(rocksdb::Options &rocksdb_opt, 
+                          tmpdb::Compactor *compactor,
+                          std::shared_ptr<rocksdb::FileCacheTracker> tracker)
+{
+    rocksdb_opt.statistics->Reset();
+    rocksdb::get_iostats_context()->Reset();
+    rocksdb::get_perf_context()->Reset();
+    compactor->stats.reset_epoch();
+    if (tracker) {
+        tracker->ResetEpochStats();
+        tracker->Clear();
+    }
+}
+
 // 单次的Alpha的实验：分离测量
 MotivatingExpResult run_single_alpha_experiment(environment &env, double alpha)
 {
@@ -350,16 +358,23 @@ MotivatingExpResult run_single_alpha_experiment(environment &env, double alpha)
     result.Mbuf = Mbuf;
     result.Mcache = Mcache;
     
-    // 创建唯一的数据库路径
+    // 创建唯一的数据库路径和日志路径
     std::string db_path = env.db_path + "_alpha_" + std::to_string(static_cast<int>(alpha * 100));
+    // std::string wal_path = "/mnt/essd/wal_alpha_" + std::to_string(static_cast<int>(alpha * 100));
     
     spdlog::info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-    spdlog::info("Running alpha = {:.3f} (Mbuf={} MB, Mcache={} MB)",
-                 alpha, Mbuf / (1024*1024), Mcache / (1024*1024));
+    spdlog::info("Running alpha = {:.3f} (Mbuf={:.1f} MB, Mcache={:.1f} MB)",
+             alpha, Mbuf / (1024.0*1024.0), Mcache / (1024.0*1024.0));
     spdlog::info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
     
     // 销毁旧数据库
     rocksdb::DestroyDB(db_path, rocksdb::Options());
+    std::string rm_db_cmd = "rm -rf " + db_path;
+    // std::string rm_wal_cmd = "rm -rf " + wal_path;
+    system(rm_db_cmd.c_str());
+    // system(rm_wal_cmd.c_str());
+    // std::string mkdir_wal_cmd = "mkdir -p " + wal_path;
+    // system(mkdir_wal_cmd.c_str());
     
     // ==================== 配置 RocksDB ====================
     rocksdb::Options rocksdb_opt;
@@ -372,9 +387,10 @@ MotivatingExpResult run_single_alpha_experiment(environment &env, double alpha)
     rocksdb_opt.use_direct_io_for_flush_and_compaction = true;
     rocksdb_opt.compaction_style = rocksdb::kCompactionStyleNone;
     rocksdb_opt.disable_auto_compactions = true;
-    rocksdb_opt.max_total_wal_size = 128 * 1024 * 1024; // 128MB
+    // rocksdb_opt.max_total_wal_size = 128 * 1024 * 1024; // 128MB
     rocksdb_opt.max_bytes_for_level_multiplier = env.T; // 默认情况下是10
     rocksdb_opt.write_buffer_size = Mbuf;
+    // rocksdb_opt.wal_dir = wal_path;
     
     // ==================== 配置自定义Compactor ====================
     tmpdb::Compactor *compactor = nullptr;
@@ -431,21 +447,37 @@ MotivatingExpResult run_single_alpha_experiment(environment &env, double alpha)
         return result;
     }
 
-    // ==================== 初始化数据 ====================
-    spdlog::info("Initializing {} entries...", env.N);
-    
     rocksdb::WriteOptions write_opt;
     write_opt.low_pri = true;
-    write_opt.disableWAL = false; //开启写日志
+    write_opt.disableWAL = true;
+    // write_opt.disableWAL = false; //开启写日志
 
-    DataGenerator *data_gen = new YCSBGenerator(env.N, "uniform", 0.0);
+    ReadOptions read_options;
+    read_options.total_order_seek = true;
+
+    std::string value, key, limit;
     std::pair<std::string, std::string> key_value;
 
+    // 1️⃣ 初始化LSM-tree阶段：注入N个entry
+    spdlog::info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+    spdlog::info("Phase 1: Initializing LSM-tree with {} entries", env.N);
+    spdlog::info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+    std::cout << std::endl;  // 为进度条预留空行
+    
+    DataGenerator *data_gen = new YCSBGenerator(env.N, "uniform", 0.0);
+
     auto initial_time_start = std::chrono::high_resolution_clock::now();
-    for (size_t entry_num = 0; entry_num < env.N; entry_num += 1)
+
+    // 初始化阶段-进度条显示
     {
-        key_value = data_gen->gen_kv_pair(env.E);
-        db->Put(write_opt, key_value.first, key_value.second);
+        ProgressBar progress(env.N, "📥 Phase1: Init Data  ");
+        for (size_t entry_num = 0; entry_num < env.N; entry_num += 1)
+        {
+            key_value = data_gen->gen_kv_pair(env.E);
+            db->Put(write_opt, key_value.first, key_value.second);
+            progress.update();
+        }
+        progress.finish();
     }
 
     spdlog::info("Waiting for initial compactions to finish...");
@@ -457,41 +489,55 @@ MotivatingExpResult run_single_alpha_experiment(environment &env, double alpha)
     spdlog::info("(init_time) : ({})", initial_time);
 
     print_db_status(db);
-    
-    std::string value, key, limit;
     delete data_gen;
-    data_gen = new YCSBGenerator(env.N, env.dist_mode, env.skew);
-
-    // // data_gen2用于生成uniform的随机数值用于在写入时操作，确保丰富的Compaction流程
-    // DataGenerator *data_gen2 = new YCSBGenerator(env.N, "uniform", 0.0);
-    // 读相关参数
-    ReadOptions read_options;
-    read_options.total_order_seek = true;
-
     
-    // ==================== 🌟 step1.执行纯读工作负载(H_cap) ====================
-    // Read-only workload H_cap只与缓存容量 + 访问分布(Zipfian skewness有关)
-    // ==================== ✅ 重置统计信息====================
-    rocksdb_opt.statistics->Reset();
-    rocksdb::get_iostats_context()->Reset();
-    rocksdb::get_perf_context()->Reset();
-    compactor->stats.reset_epoch();
-    tracker->ResetEpochStats();
-    tracker->Clear();  // 清空目前所有的跟踪数据
-    // ==================== ✅ 重置结束 ====================
-
+    // 2️⃣ 预热阶段：执行1/4的总的操作数量
     spdlog::info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-    spdlog::info("Starting Read-Only Workload Execution: Total queries: {}", env.queries);
+    spdlog::info("Phase 2: Warming up cache with {} queries", env.queries / 4);
     spdlog::info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+    std::cout << std::endl;  // 为进度条预留空行
 
-    auto read_start = std::chrono::high_resolution_clock::now();
-
-    // 这里一定不能是全部的queries，因为实际执行的混合负载中还包含写操作
-    uint64_t read_queries = env.queries * env.non_empty_reads / (env.non_empty_reads + env.writes);
-    for (size_t i = 0; i < read_queries; i++)
+    data_gen = new YCSBGenerator(env.N, env.dist_mode, env.skew);
+    auto warmup_start = std::chrono::high_resolution_clock::now();
+    uint64_t warmup_queries = env.queries / 4;
     {
-        std::string key = data_gen->gen_existing_key();
-        db->Get(read_options, key, &value);
+        ProgressBar progress(warmup_queries, "🔥 WarmUp Data  ");
+        for (size_t i = 0; i < warmup_queries; i++)
+        {
+            std::string key = data_gen->gen_existing_key();
+            db->Get(read_options, key, &value);
+            progress.update();
+        }
+        progress.finish();
+    }
+    auto warmup_end = std::chrono::high_resolution_clock::now();
+    auto warmup_time = std::chrono::duration_cast<std::chrono::milliseconds>(
+        warmup_end - warmup_start).count();
+
+    spdlog::info("(warmup_time) : ({})", warmup_time);
+    delete data_gen;
+
+    // 3️⃣ 执行纯读工作负载H_cap
+    spdlog::info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+    spdlog::info("Phase 3: Read-Only workload to measure H_cap");
+    spdlog::info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+    std::cout << std::endl;  // 为进度条预留空行
+
+    reset_all_statistics(rocksdb_opt, compactor, tracker); // 重置所有统计信息 丢弃预热的命中率影响
+
+    // 重新创建数据生成器以保证访问模式一致性
+    data_gen = new YCSBGenerator(env.N, env.dist_mode, env.skew);
+    auto read_start = std::chrono::high_resolution_clock::now();
+    uint64_t read_queries = env.queries * env.non_empty_reads / (env.non_empty_reads + env.writes);
+    {
+        ProgressBar progress(read_queries, "📖 Read-Only  ");
+        for (size_t i = 0; i < read_queries; i++)
+        {
+            std::string key = data_gen->gen_existing_key();
+            db->Get(read_options, key, &value);
+            progress.update();
+        }
+        progress.finish();
     }
 
     auto read_end = std::chrono::high_resolution_clock::now();
@@ -499,9 +545,8 @@ MotivatingExpResult run_single_alpha_experiment(environment &env, double alpha)
         read_end - read_start).count();
 
     spdlog::info("(read_only_time) : ({})", read_time);
-    result.read_only_latency_ms = read_time;
 
-    // ✅✅✅ 计算 H_cap
+    // 计算 H_cap
     std::map<std::string, uint64_t> read_stats;
     rocksdb_opt.statistics->getTickerMap(&read_stats);
 
@@ -511,32 +556,52 @@ MotivatingExpResult run_single_alpha_experiment(environment &env, double alpha)
     result.H_cap = (read_phase_hits + read_phase_misses) > 0 ?
         static_cast<double>(read_phase_hits) / static_cast<double>(read_phase_hits + read_phase_misses) : 0.0;
 
-    spdlog::info("[Phase 1] H_cap = {:.4f} (hits={}, misses={})",
+    spdlog::info("[Phase 3] H_cap = {:.4f} (hits={}, misses={})",
                  result.H_cap, read_phase_hits, read_phase_misses);
     delete data_gen;
 
-    // ==================== 🌟 step2.混合读写测量(H_cache) ====================
-    // ==================== ✅ 重置统计信息 + 清空缓存 ====================
-    rocksdb_opt.statistics->Reset();
-    rocksdb::get_iostats_context()->Reset();
-    rocksdb::get_perf_context()->Reset();
-    compactor->stats.reset_epoch();
-    tracker->ResetEpochStats();
-    tracker->Clear();  // 清空目前所有的跟踪数据
-
-    block_cache->SetCapacity(0); // 清空缓存
-    block_cache->SetCapacity(Mcache); // 恢复缓存容量
-    // 检查当前使用量是否为空
-    size_t usage = block_cache->GetUsage();
-    spdlog::info("Cache usage after clear: {} MB", usage / (1024*1024));
-    // ==================== ✅ 重置结束 ====================
-
+    // 4️⃣ 清空缓存-重新预热
     spdlog::info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-    spdlog::info("Starting Mixed Read-Write Workload Execution: Total queries: {}", env.queries);
+    spdlog::info("Phase 4: Clear cache and re-warm");
     spdlog::info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+    std::cout << std::endl;  // 为进度条预留空行
+
+    block_cache->SetCapacity(0);
+    block_cache->SetCapacity(Mcache);
+    spdlog::info("Cache cleared. Current usage: {} MB", block_cache->GetUsage() / (1024*1024));
+
+    data_gen = new YCSBGenerator(env.N, env.dist_mode, env.skew);
+    auto warmup_start2 = std::chrono::high_resolution_clock::now();
+    {
+        ProgressBar progress(warmup_queries, "🔥 WarmUp Data Again  ");
+        for (size_t i = 0; i < warmup_queries; i++)
+        {
+            std::string key = data_gen->gen_existing_key();
+            db->Get(read_options, key, &value);
+            progress.update();
+        }
+        progress.finish();
+    }
+    auto warmup_end2 = std::chrono::high_resolution_clock::now();
+    auto warmup_time2 = std::chrono::duration_cast<std::chrono::milliseconds>(
+        warmup_end2 - warmup_start2).count();
+
+    spdlog::info("(warmup_time2) : ({})", warmup_time2);
+    delete data_gen;
     
+    // 5️⃣ 执行混合工作负载
+    spdlog::info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+    spdlog::info("Phase 5: Mixed R/W workload to measure H_cache");
+    spdlog::info("  Workload: reads={:.0f}%, writes={:.0f}%", 
+                 env.non_empty_reads * 100, env.writes * 100);
+    spdlog::info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+    std::cout << std::endl;
+
+    reset_all_statistics(rocksdb_opt, compactor, tracker);
+
+    data_gen = new YCSBGenerator(env.N, env.dist_mode, env.skew);
+
     rocksdb::Iterator *it = db->NewIterator(read_options);
-    data_gen = new YCSBGenerator(env.N, env.dist_mode, env.skew); // 重新创建数据生成器以获得完全的相同模式
     double p[] = {env.empty_reads, env.non_empty_reads, env.range_reads, env.writes};
     double cumprob[] = {p[0], p[0] + p[1], p[0] + p[1] + p[2], 1.0};
 
@@ -550,57 +615,62 @@ MotivatingExpResult run_single_alpha_experiment(environment &env, double alpha)
     env.sel = PAGESIZE / env.E;
     auto mix_time_start = std::chrono::high_resolution_clock::now();
     
-    // 混合负载主循环
-    for (size_t i = 0; i < env.queries; i++)
+    // 混合负载主循环-进度条显示
     {
-        double r = dist(engine);
-        int outcome = 0;
-        for (int j = 0; j < 4; j++)
+        ProgressBar progress(env.queries, "🔄 Phase5: Mixed R/W  ");
+        for (size_t i = 0; i < env.queries; i++)
         {
-            if (r < cumprob[j])
+            double r = dist(engine);
+            int outcome = 0;
+            for (int j = 0; j < 4; j++)
             {
-                outcome = j;
-                break;
-            }
-        }
-        
-        switch (outcome)
-        {
-            case 0:  // Empty read
-            {
-                key = data_gen->gen_new_dup_key();
-                status = db->Get(read_options, key, &value);
-                break;
-            }
-            case 1:  // Non-empty read ✅
-            {
-                key = data_gen->gen_existing_key();
-                status = db->Get(read_options, key, &value);
-                break;
-            }
-            case 2:  // Range read
-            {
-                key = data_gen->gen_existing_key();
-                limit = std::to_string(stoi(key) + 1 + env.sel);
-                for (it->Seek(rocksdb::Slice(key)); 
-                    it->Valid() && it->key().ToString() < limit; 
-                    it->Next())
+                if (r < cumprob[j])
                 {
-                    value = it->value().ToString();
+                    outcome = j;
+                    break;
                 }
-                break;
             }
-            case 3:  // Write ✅
+            
+            switch (outcome)
             {
-                key_value = data_gen->gen_existing_kv_pair(env.E);
-                // key_value = data_gen2->gen_existing_kv_pair(env.E);
-                db->Put(write_opt, key_value.first, key_value.second);
-                break;
+                case 0:  // Empty read
+                {
+                    key = data_gen->gen_new_dup_key();
+                    status = db->Get(read_options, key, &value);
+                    break;
+                }
+                case 1:  // Non-empty read ✅
+                {
+                    key = data_gen->gen_existing_key();
+                    status = db->Get(read_options, key, &value);
+                    break;
+                }
+                case 2:  // Range read
+                {
+                    key = data_gen->gen_existing_key();
+                    limit = std::to_string(stoi(key) + 1 + env.sel);
+                    for (it->Seek(rocksdb::Slice(key)); 
+                        it->Valid() && it->key().ToString() < limit; 
+                        it->Next())
+                    {
+                        value = it->value().ToString();
+                    }
+                    break;
+                }
+                case 3:  // Write ✅
+                {
+                    key_value = data_gen->gen_existing_kv_pair(env.E);
+                    db->Put(write_opt, key_value.first, key_value.second);
+                    break;
+                }
+                default:
+                    break;
             }
-            default:
-                break;
+            progress.update();
         }
+        progress.finish();
     }
+
     delete it;
     wait_for_compactions(db, compactor);
     
@@ -609,7 +679,6 @@ MotivatingExpResult run_single_alpha_experiment(environment &env, double alpha)
         mix_time_end - mix_time_start).count();
 
     spdlog::info("(mix_time) : ({})", mix_time);
-    result.mixed_workload_latency_ms = mix_time;
     
     // ✅✅✅ 计算 H_cache
     std::map<std::string, uint64_t> mixed_stats;
@@ -624,7 +693,7 @@ MotivatingExpResult run_single_alpha_experiment(environment &env, double alpha)
     result.H_val = (result.H_cap > 0.0) ?
         result.H_cache / result.H_cap : 0.0;
         
-    spdlog::info("  [Phase 2] H_cache = {:.4f}, H_val = H_cache/H_cap = {:.4f}",
+    spdlog::info("  [Phase 5] H_cache = {:.4f}, H_val = H_cache/H_cap = {:.4f}",
                  result.H_cache, result.H_val);
 
     // ✅✅✅ 收集五阶段链条指标
@@ -660,8 +729,8 @@ MotivatingExpResult run_single_alpha_experiment(environment &env, double alpha)
     
     // ✅ 添加五阶段链条验证日志
     spdlog::info("=== Five-Stage Chain Verification ===");
-    spdlog::info("Stage 0:  α={:.3f} → Mbuf={} MB", result.alpha, result.Mbuf/(1024*1024));
-    spdlog::info("Stage 0': α={:.3f} → Mcache={} MB", result.alpha, result.Mcache/(1024*1024));
+    spdlog::info("Stage 0:  α={:.3f} → Mbuf={:.1f} MB", result.alpha, result.Mbuf/(1024.0*1024.0));
+    spdlog::info("Stage 0': α={:.3f} → Mcache={:.1f} MB", result.alpha, result.Mcache/(1024.0*1024.0));
     spdlog::info("Stage 1:  Flush count={}, bytes={} KB", 
                 result.flush_count, result.flush_bytes/1024);
     spdlog::info("Stage 2:  Compaction count={}, read={} KB, write={} KB", 
@@ -676,18 +745,19 @@ MotivatingExpResult run_single_alpha_experiment(environment &env, double alpha)
     db->Close();
     delete db;
     delete data_gen;
-    // delete data_gen2;
     
     rocksdb::DestroyDB(db_path, rocksdb::Options());
+    system(rm_db_cmd.c_str());
+    // system(rm_wal_cmd.c_str());
     
     return result;
 }
 
 int run_motivating_experiment(environment &env)
 {
-    spdlog::info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-    spdlog::info("Motivating Experiment: Five-Stage Coupling Model Verification");
-    spdlog::info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+    // spdlog::info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+    // spdlog::info("Motivating Experiment: Five-Stage Coupling Model Verification");
+    // spdlog::info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
     
     // 总内存预算M + 初始化总数据量 + 工作负载读写比例
     spdlog::info("Configuration:");
@@ -726,72 +796,6 @@ int run_motivating_experiment(environment &env)
     else
     {
         spdlog::error("Failed to open output file: {}", env.exp_output_file);
-    }
-    
-    // ==================== 非单调性分析 ====================
-    if (results.size() > 2)
-    {
-        spdlog::info("");
-        spdlog::info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-        spdlog::info("Non-monotonicity Analysis");
-        spdlog::info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-
-        // 找H_cache最大值
-        auto max_it = std::max_element(results.begin(), results.end(),
-            [](const MotivatingExpResult& a, const MotivatingExpResult& b) {
-                return a.H_cache < b.H_cache;
-            });
-        
-        size_t max_idx = std::distance(results.begin(), max_it);
-        
-        spdlog::info("");
-        spdlog::info("Cache Hit Rate:");
-        spdlog::info("  at alpha = {:.3f}: {:.4f}", results.front().alpha, results.front().H_cache);
-        spdlog::info("  at alpha = {:.3f}: {:.4f} (maximum)", max_it->alpha, max_it->H_cache);
-        spdlog::info("  at alpha = {:.3f}: {:.4f}", results.back().alpha, results.back().H_cache);
-        
-        // 检查非单调性
-        bool has_increase = false, has_decrease = false;
-        for (size_t i = 1; i < results.size(); i++)
-        {
-            double diff = results[i].H_cache - results[i-1].H_cache;
-            if (diff > 0.001) has_increase = true;
-            if (diff < -0.001) has_decrease = true;
-        }
-        
-        bool is_interior_max = (max_idx > 0) && (max_idx < results.size() - 1);
-        bool is_non_monotonic = has_increase && has_decrease;
-        
-        spdlog::info("");
-        spdlog::info("Verification:");
-        spdlog::info("  Has increasing segment: {}", has_increase ? "Yes" : "No");
-        spdlog::info("  Has decreasing segment: {}", has_decrease ? "Yes" : "No");
-        spdlog::info("  Interior maximum: {}", is_interior_max ? "Yes" : "No");
-        
-        if (is_non_monotonic && is_interior_max)
-        {
-            double improvement = max_it->H_cache - 
-                std::max(results.front().H_cache, results.back().H_cache);
-            double improvement_pct = improvement / 
-                std::max(results.front().H_cache, results.back().H_cache) * 100;
-
-            spdlog::info("");
-            spdlog::info("✓ NON-MONOTONICITY VERIFIED!");
-            spdlog::info("  Optimal alpha* = {:.4f}", max_it->alpha);
-            spdlog::info("  Improvement over boundary: {:.4f} ({:.1f}%)", improvement, improvement_pct);
-            spdlog::info("");
-            spdlog::info("  This validates the Five-Stage Coupling Model:");
-            spdlog::info("  H_cache(alpha) = H_cap(alpha) × H_val(alpha) has an interior maximum.");
-        }
-        else
-        {
-            spdlog::info("");
-            spdlog::warn("Non-monotonicity not clearly observed.");
-            spdlog::info("Suggestions:");
-            spdlog::info("  - Increase write ratio (-w)");
-            spdlog::info("  - Increase data size (-N)");
-            spdlog::info("  - Use finer alpha step (--alpha-step)");
-        }
     }
     
     spdlog::info("");
