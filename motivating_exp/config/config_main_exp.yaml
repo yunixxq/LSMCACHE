@@ -1,0 +1,23 @@
+app:
+    app_name: "sampling_exp"
+    app_logging_level: "INFO"
+    
+    ROOT_DIR: "motivating_exp"
+    DATA_DIR: "data"
+    
+    EXECUTION_PATH: "build/db_runner_main"
+    DATABASE_PATH: "/data"
+
+output_path:
+    full_exp_output: "data/main_results.csv"
+    epoch_exp_output: "/data/epoch_results.csv"
+
+lsm_tree_config:
+    E: 1024              # Entry size: 1KB bytes/entry
+    M: 1073741824        # Total memory: 1GB bytes (可调整为 4GB = 4294967296)
+    N: 10000000          # 初始化 entry 数量: 1000万条记录 (~10GB 数据)
+    Q: 10000000          # 查询数量: 1000万 (每个 alpha 值)
+    s: 4                 # Range query selectivity
+    T: 5                 # Size ratio
+    h: 5                 # Bloom filter bits per element
+

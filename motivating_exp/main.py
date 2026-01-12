@@ -9,111 +9,106 @@ import random
 import pickle as pkl
 
 sys.path.append("./motivating_exp")
-from motivating_runner import Runner
-from lsm_tree.PyRocksDB import RocksDB
+from calm_runner import Runner
+from lsm_tree.PyRocksDB_main import RocksDB
+from lsm_tree.lsm import predict_best_alpha
 
 np.set_printoptions(suppress=True)
 
 # ============ 加载全局配置文件 ============
-config_yaml_path = os.path.join("motivating_exp/config/config_motivating_exp.yaml")
+config_yaml_path = os.path.join("motivating_exp/config/config_main_exp.yaml")
 with open(config_yaml_path) as f:
     config = yaml.load(f, Loader=yaml.FullLoader)
 
-# Motivating Experiment 工作负载配置
-workloads = [
-    # (0.00, 0.90, 0.00, 0.10), # writes = 10%
-    # (0.00, 0.80, 0.00, 0.20), # writes = 20%
-    # (0.00, 0.70, 0.00, 0.30), # writes = 30%
-    # (0.00, 0.60, 0.00, 0.40), # writes = 40%
-    (0.00, 0.50, 0.00, 0.50), # writes = 50%
-]
+skewness_values = [0.7, 0.8, 0.9, 0.99]
 
-# 通过扫描不同的alpha值，测量H_cap, H_val, H_cache
-# 验证五阶段耦合模型
-class MotivatingExperiment(object):
+read_ratio1, write_ratio1 = 0.5, 0.5
+read_ratio2, write_ratio2 = 0.6, 0.4
+
+''' 一共四种模型选择:
+    calm_lgb_base_model.pkl  calm_lgb_full_model.pkl
+    calm_xgb_base_model.pkl  calm_xgb_full_model.pkl
+'''
+with open("models/calm_lgb_full_model.pkl", "rb") as f:
+    offline_model = pkl.load(f)
+
+class MainExp(object):
     
     def __init__(self, config):
         self.config = config
         self.logger = logging.getLogger("rlt_logger")
     
     def run(self):
-        df = []  # 记录所有运行结果
+        exp_output_file = self.config["output_path"]["full_exp_output"]
+        epoch_output_file = self.config["output_path"]["epoch_exp_output"]
         
-        for workload_idx, workload in enumerate(workloads):
-            z0, z1, q, w = workload
-            
-            self.logger.info(f"=" * 60)
-            self.logger.info(f"Workload {workload_idx + 1}: empty={z0}, non_empty={z1}, range={q}, writes={w}")
-            self.logger.info(f"=" * 60)
-            
-            # 获取 alpha 扫描配置
-            alpha_config = self.config.get("alpha_sweep", {})
-            alpha_start = alpha_config.get("start", 0.05)
-            alpha_end = alpha_config.get("end", 0.95)
-            alpha_step = alpha_config.get("step", 0.05)
-            
-            # 构建基础配置
-            base_row = self.config["lsm_tree_config"].copy()
-            base_row["db_name"] = "motivating_exp"
-            base_row["path_db"] = self.config["app"]["DATABASE_PATH"]
-            base_row["dist"] = self.config.get("workload", {}).get("dist", "zipfian")
-            base_row["skew"] = self.config.get("workload", {}).get("skew", 0.99)
-            base_row["z0"] = z0
-            base_row["z1"] = z1
-            base_row["q"] = q
-            base_row["w"] = w
-            
-            self.logger.info(f'Running Motivating Experiment with N={base_row["N"]} entries')
-            
-            # 创建 RocksDB 实例
+        # 写入CSV表头(只写一次)
+        csv_header_1 = "M_MB,N,Q,T,skewness,read_ratio_1,write_ratio_1,read_ratio_2,write_ratio_2," \
+                 "alpha_initial,alpha_final,Mbuf_MB,Mcache_MB," \
+                 "H_cache,write_io_kb_per_op,read_io_kb_per_op,total_io_kb_per_op," \
+                 "latency,rl_epochs_count,drift_count,converged"
+
+        csv_header_2 = "epoch_id,alpha,queries,H_cache,latency_ms," \
+                "write_io_kb_per_op,read_io_kb_per_op,total_io_kb_per_op," \
+                "performance_score,event"
+
+        with open(exp_output_file, 'w') as f:
+            f.write(csv_header_1 + "\n")
+        
+        with open(epoch_output_file, 'w') as f:
+            f.write(csv_header_2 + "\n")
+
+        for skew in skewness_values:
+
+            # offline_model = pkl.load(
+            #     open("models/calm_lgb_base_model.pkl", "rb")
+            # )
+
+            ''' 一共四种特征参数选择
+            full base
+            '''
+            feature_type = "full"
+
+            h = self.config["lsm_tree_config"]["h"]
+            T = self.config["lsm_tree_config"]["T"]
+            N = self.config["lsm_tree_config"]["N"]
+            E = self.config["lsm_tree_config"]["E"]
+            M = self.config["lsm_tree_config"]["M"]
+            Q = self.config["lsm_tree_config"]["Q"]
+
+            M_MB = M / (1024 * 1024)
+            best_alpha_1 = predict_best_alpha(offline_model, read_ratio1, write_ratio1, skew, T, M_MB, N, feature_type)
+            best_alpha_2 = predict_best_alpha(offline_model, read_ratio2, write_ratio2, skew, T, M_MB, N, feature_type)
+
             db = RocksDB(self.config)
-            
-            # 运行实验
-            results = db.run(
-                db_name=base_row["db_name"],
-                path_db=base_row["path_db"],
-                h=base_row["h"],
-                T=base_row["T"],
-                N=base_row["N"],
-                E=base_row["E"],
-                M=base_row["M"],
-                num_z0=z0,
-                num_z1=z1,
-                num_q=q,
-                num_w=w,
-                dist=base_row["dist"],
-                skew=base_row["skew"],
-                queries=base_row["Q"],
-                sel=base_row.get("s", 4),
-                alpha_start=alpha_start,
-                alpha_end=alpha_end,
-                alpha_step=alpha_step,
-                output_file=self.config["optimizer_path"]["motivating_exp_output"],
+            db.run(
+                db_name = "sampling_exp",
+                path_db = self.config["app"]["DATABASE_PATH"],
+                h = h,
+                T = T,
+                N = N,
+                E = E,
+                M = M,
+                Q = Q,
+                alpha_1 = best_alpha_1,
+                alpha_2 = best_alpha_2,
+                read_num_1 = read_ratio1,
+                write_num_1 = write_ratio1,
+                read_num_2 = read_ratio2,
+                write_num_2 = write_ratio2,
+                dist = "zipfian",
+                skew = skew,
+                rl_step = 0.05,
+                rl_max_epochs = 20,
+                rl_conv_win = 3,
+                rl_imp_thre = 0.005,
+                epoch_ops = 10000,
+                exp_output_file = exp_output_file,
+                epoch_output_file = epoch_output_file,
             )
-            
-            # 记录结果
-            for key, val in results.items():
-                self.logger.info(f"{key} : {val}")
-                base_row[f"{key}"] = val
-            
-            df.append(base_row)
-            
-            # 保存检查点
-            pd.DataFrame(df).to_csv(
-                self.config["optimizer_path"]["motivating_exp_ckpt"], 
-                index=False
-            )
-        
-        # 保存最终结果
-        pd.DataFrame(df).to_csv(
-            self.config["optimizer_path"]["motivating_exp_final"], 
-            index=False
-        )
-        
-        self.logger.info("=" * 60)
-        self.logger.info("Motivating Experiment Completed!")
-        self.logger.info(f"Results saved to: {self.config['optimizer_path']['motivating_exp_final']}")
-        self.logger.info("=" * 60)
+
+        self.logger.info(f"All  experiments completed!")
+        self.logger.info(f"Results saved to: {exp_output_file} and {epoch_output_file}")
 
 
 if __name__ == "__main__":
@@ -121,11 +116,11 @@ if __name__ == "__main__":
     if len(sys.argv) > 1:
         config_yaml_path = sys.argv[1]
     else:
-        config_yaml_path = os.path.join("motivating_exp/config/config_motivating_exp.yaml")
+        config_yaml_path = os.path.join("motivating_exp/config/config_main_exp.yaml")
 
     with open(config_yaml_path) as f:
         config = yaml.load(f, Loader=yaml.FullLoader)
 
     # 启动实验
     driver = Runner(config)
-    driver.run(MotivatingExperiment(config))
+    driver.run(MainExp(config))
