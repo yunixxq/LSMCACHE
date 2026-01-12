@@ -1,0 +1,68 @@
+app:
+    app_name: "sampling_exp"
+    app_logging_level: "INFO"
+    
+    ROOT_DIR: "motivating_exp"
+    DATA_DIR: "data"
+    
+    EXECUTION_PATH: "build/db_runner_sampling"
+    DATABASE_PATH: "/data"
+
+output_path:
+    sampling_exp_output: "data/sampling_exp_results.csv"
+    results_dir: "results"
+
+# sampling result 1
+# lsm_tree_config:
+#     E: 1024              # Entry size: 1KB bytes/entry
+#     M: 1073741824        # Total memory: 1GB bytes (可调整为 4GB = 4294967296)
+#     N: 10000000          # 初始化 entry 数量: 1000万条记录 (~10GB 数据)
+#     Q: 10000000          # 查询数量: 1000万 (每个 alpha 值)
+#     s: 4                 # Range query selectivity
+#     T: 5                 # Size ratio
+#     h: 5                 # Bloom filter bits per element
+
+# sampling result 2
+# lsm_tree_config:
+#     E: 1024              # Entry size: 1KB bytes/entry
+#     M: 536870912        # Total memory: 512MB bytes 
+#     N: 7000000          # 初始化 entry 数量: 700万条记录 (~10GB 数据)
+#     Q: 7000000          # 查询数量: 700万 (每个 alpha 值)
+#     s: 4                 # Range query selectivity
+#     T: 5                 # Size ratio
+#     h: 5                 # Bloom filter bits per element
+
+lsm_tree_config:
+    E: 1024              # Entry size: 1KB bytes/entry
+    M: 536870912        # Total memory: 512MB bytes 
+    N: 5000000          # 初始化 entry 数量: 500万条记录 (~10GB 数据)
+    Q: 5000000          # 查询数量: 500万 (每个 alpha 值)
+    s: 4                 # Range query selectivity
+    T: 6                 # Size ratio
+    h: 5                 # Bloom filter bits per element
+
+# lsm_tree_config:
+#     E: 1024              # Entry size: 1KB bytes/entry
+#     M: 4294967296        # Total memory: 4GB bytes (可调整为 4GB = 4294967296)
+#     N: 100000000         # 初始化 entry 数量: 10000万条记录 (~95GB 数据)
+#     Q: 100000000         # 查询数量: 10000万 (每个 alpha 值)
+#     s: 4                 # Range query selectivity
+#     T: 5                 # Size ratio
+#     h: 5                 # Bloom filter bits per element
+
+# lsm_tree_config:
+#     M: 33554432 # 总内存预算 32MB 32 * 2^20(1M)
+#     N: 100000  # entry 数量 10 万条记录 ≈ 100MB 数据
+#     Q: 1500000 # 查询数量 150 万
+#     s: 4 # range query selectivity
+#     E: 1024    # bits/entry  1 KB
+#     T: 5                 # Size ratio
+#     h: 5                 # Bloom filter bits per element
+
+xgb_model:
+    calm_xgb_base_model: "models/calm_xgb_base_model.pkl"
+    calm_xgb_full_model: "models/calm_xgb_full_model.pkl"
+
+lgb_model:
+    calm_lgb_base_model: "models/calm_lgb_base_model.pkl"
+    calm_lgb_full_model: "models/calm_lgb_full_model.pkl"
