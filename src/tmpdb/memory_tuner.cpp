@@ -614,9 +614,9 @@ void MemoryTuner::resize_block_cache(size_t new_size) {
 void MemoryTuner::resize_write_buffer(size_t new_size) {
     if (db_) {
         std::unordered_map<std::string, std::string> new_options;
-        new_options["write_buffer_size"] = std::to_string(new_size);
+        // new_options["write_buffer_size"] = std::to_string(new_size);
         
-        rocksdb::Status s = db_->SetOptions(new_options);
+        rocksdb::Status s = db_->SetOptions({{"write_buffer_size", std::to_string(new_size)}});
         if (s.ok()) {
             spdlog::debug("Write buffer size set to {} MB", new_size / (1024 * 1024));
         } else {
