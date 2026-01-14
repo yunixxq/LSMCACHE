@@ -164,9 +164,15 @@ CompactionTask *Compactor::PickCompaction(rocksdb::DB *db,
 // → Compactor::OnFlushCompleted → PickCompaction → ScheduleCompaction
 void Compactor::OnFlushCompleted(rocksdb::DB *db, const ROCKSDB_NAMESPACE::FlushJobInfo &info)
 {
+    // spdlog::info("Flush created: {}", info.file_path);
+    // ⬆️ 这里得到的是完整路径 /data/sampling_exp_alpha_5/000079.sst
+
     // ===== 记录 Flush 统计 ===== 
     stats.total_flush_count++;
     stats.epoch_flush_count++;
+
+    // ✅ 新增：记录Flush产生的SST出生时间
+    sst_lifetime_tracker.on_sst_created_if_not_exists(info.file_path);
 
     // ✅ 区分flush类型
     // 根据FlushReason判断是memory-triggered还是log-triggered
@@ -248,6 +254,12 @@ void Compactor::CompactFiles(void *arg)
     assert(task->db);
     assert(task->output_level > (int)task->origin_level_id);
 
+    // 添加在这里 - 查看Compaction输入文件的名称格式
+    // if (!task->input_file_names.empty()) {
+    //     spdlog::info("Compaction input: {}", task->input_file_names[0]);
+    // }
+    // ⬆️ 这里的输出是 Compaction input: /000078.sst
+
     // spdlog::info("CompactFiles starting: L{} -> L{}, files={}",
     //               task->origin_level_id, task->output_level,
     //               task->input_file_names.size());
@@ -268,6 +280,19 @@ void Compactor::CompactFiles(void *arg)
     
     if(s.ok())
     {
+        // ✅ 新增：记录输入文件死亡（生命周期结束）
+        for (const auto& filename : task->input_file_names) {
+            compactor->sst_lifetime_tracker.on_sst_deleted(filename);
+        }
+
+        // ✅ 新增：记录Compaction产生的输出文件出生
+        rocksdb::ColumnFamilyMetaData cf_meta;
+        task->db->GetColumnFamilyMetaData(&cf_meta);
+        for (const auto& file : cf_meta.levels[task->output_level].files) {
+            // 使用统一格式检查是否已存在
+            compactor->sst_lifetime_tracker.on_sst_created_if_not_exists(file.name);
+        }
+
         // ✅ 更新统计信息
         compactor->stats.total_compaction_count++;
         compactor->stats.epoch_compaction_count++;

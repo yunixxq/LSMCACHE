@@ -59,6 +59,8 @@ struct SamplingExpResult
     // Stage 3: F_comp → τ_sst (SST 平均生命周期)
     uint64_t sst_inv_count;     // SST文件失效数量
     double sst_inv_rate;      // SST文件失效率 (个/秒)
+
+    double avg_sst_lifetime_ms; // SST平均生命周期
     
     // Stage 4: τ_sst → I_inv (失效率)
     uint64_t cache_inv_count;   // 缓存失效数量
@@ -100,6 +102,7 @@ struct SamplingExpResult
             << write_io_kb_per_op << ","
             << read_io_kb_per_op << ","
             << total_io_kb_per_op << ","
+            << avg_sst_lifetime_ms << ","
             << latency;
         return oss.str();
     }
@@ -109,7 +112,7 @@ struct SamplingExpResult
            "alpha,Mbuf_MB,Mcache_MB,"
            "flush_count,flush_rate,compaction_count,compaction_rate,"
            "sst_inv_count,sst_inv_rate,cache_inv_count,cache_inv_rate,"
-           "H_cache,write_io_kb_per_op,read_io_kb_per_op,total_io_kb_per_op,latency";
+           "H_cache,write_io_kb_per_op,read_io_kb_per_op,total_io_kb_per_op,avg_sst_lifetime_ms,latency";
     }
 };
 
@@ -254,16 +257,30 @@ void wait_for_compactions(rocksdb::DB *db, tmpdb::Compactor *compactor)
 
 void reset_all_statistics(rocksdb::Options &rocksdb_opt, 
                           tmpdb::Compactor *compactor,
-                          std::shared_ptr<rocksdb::FileCacheTracker> tracker)
+                          std::shared_ptr<rocksdb::FileCacheTracker> tracker,
+                          rocksdb::DB *db)
 {
     rocksdb_opt.statistics->Reset();
     rocksdb::get_iostats_context()->Reset();
     rocksdb::get_perf_context()->Reset();
     compactor->stats.reset_epoch();
+
+    compactor->sst_lifetime_tracker.clear();  // ✅ 完全清空SST生命周期追踪器
+    // ✅ 新增：记录当前所有 SST 文件（出生时间设为 epoch 开始时间）
+    rocksdb::ColumnFamilyMetaData cf_meta;
+    db->GetColumnFamilyMetaData(&cf_meta);
+    for (const auto& level : cf_meta.levels) {
+        for (const auto& file : level.files) {
+            compactor->sst_lifetime_tracker.on_sst_created_if_not_exists(file.name);
+        }
+    }
+    
     if (tracker) {
         tracker->ResetEpochStats();
         tracker->Clear();
     }
+
+
 }
 
 int run_experiment(environment &env)
@@ -433,7 +450,7 @@ int run_experiment(environment &env)
     std::cout << std::endl;
     
     // 清空前面的统计数据
-    reset_all_statistics(rocksdb_opt, compactor, tracker);
+    reset_all_statistics(rocksdb_opt, compactor, tracker, db);
 
     data_gen = new YCSBGenerator(env.N, env.dist_mode, env.skew);
 
@@ -532,10 +549,12 @@ int run_experiment(environment &env)
     result.flush_rate = (latency_sec > 0) ? result.flush_count / latency_sec : 0.0;
     result.compaction_rate = (latency_sec > 0) ? result.compaction_count / latency_sec : 0.0;
 
-    // Stage 3: SST失效数量
+    // Stage 3: SST失效数量 + SST平均生命周期
     result.sst_inv_count = compactor->stats.epoch_sst_files_invalidation.load();
     result.sst_inv_rate = (latency_sec > 0) ? result.sst_inv_count / latency_sec : 0.0;
-    
+    compactor->sst_lifetime_tracker.finalize_alive_files(); // 补上依旧存活的
+    result.avg_sst_lifetime_ms = compactor->sst_lifetime_tracker.get_epoch_avg_lifetime_ms();
+
     // Stage 4: 缓存失效数量
     result.cache_inv_count = tracker->GetStats().epoch_invalidated_entries.load();
     result.cache_inv_rate = (latency_sec > 0) ? result.cache_inv_count / latency_sec : 0.0;

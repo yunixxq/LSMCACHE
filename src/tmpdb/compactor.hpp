@@ -130,6 +130,102 @@ namespace tmpdb
         }
     };
 
+    // 辅助函数 - 统一文件名格式
+    inline std::string normalize_sst_filename(const std::string& path) {
+        size_t pos = path.find_last_of("/\\");
+        return (pos != std::string::npos) ? path.substr(pos) : path;
+    }
+
+    // SST生命周期追踪器
+    struct SSTLifetimeTracker {
+        std::mutex mutex_;
+        std::unordered_map<std::string, std::chrono::steady_clock::time_point> sst_birth_time;
+        
+        // 累计统计
+        std::atomic<uint64_t> total_lifetime_ms{0};
+        std::atomic<uint64_t> total_sst_birth_count{0};
+        
+        // Epoch统计
+        std::atomic<uint64_t> epoch_lifetime_ms{0};
+        std::atomic<uint64_t> epoch_sst_birth_count{0};
+        
+        // SST出生：Flush或Compaction产生新文件时调用
+        void on_sst_created_if_not_exists(const std::string& filepath) {
+            std::string filename = normalize_sst_filename(filepath);
+            std::lock_guard<std::mutex> lock(mutex_);
+            
+            // 如果已存在，直接返回
+            if (sst_birth_time.find(filename) != sst_birth_time.end()) {
+                return;
+            }
+            
+            sst_birth_time[filename] = std::chrono::steady_clock::now();
+            total_sst_birth_count++;
+            epoch_sst_birth_count++;
+        }
+        
+        // SST死亡：Compaction删除输入文件时调用
+        void on_sst_deleted(const std::string& filepath) {
+            std::string filename = normalize_sst_filename(filepath);
+            std::lock_guard<std::mutex> lock(mutex_);
+            
+            auto it = sst_birth_time.find(filename);
+            if (it != sst_birth_time.end()) {
+                auto lifetime = std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::steady_clock::now() - it->second).count();
+                
+                total_lifetime_ms += lifetime;
+                epoch_lifetime_ms += lifetime;
+
+                sst_birth_time.erase(it);
+            }
+        }
+
+        void finalize_alive_files() {
+            std::lock_guard<std::mutex> lock(mutex_);
+            auto now = std::chrono::steady_clock::now();
+            
+            for (const auto& file_entry : sst_birth_time) {
+                const auto& birth_time = file_entry.second;
+                auto lifetime = std::chrono::duration_cast<std::chrono::milliseconds>(
+                    now - birth_time).count();
+                
+                total_lifetime_ms += lifetime;
+                epoch_lifetime_ms += lifetime;
+                // 不增加计数，因为出生时已经计过了
+            }
+        }
+
+        
+        // 获取总体平均生命周期
+        double get_avg_lifetime_ms() const {
+            return total_sst_birth_count > 0 ? 
+                static_cast<double>(total_lifetime_ms) / total_sst_birth_count : 0.0;
+        }
+        
+        // 获取当前epoch的平均生命周期
+        double get_epoch_avg_lifetime_ms() const {
+            return epoch_sst_birth_count > 0 ? 
+                static_cast<double>(epoch_lifetime_ms) / epoch_sst_birth_count : 0.0;
+        }
+        
+        // 重置epoch统计
+        void reset_epoch() {
+            epoch_lifetime_ms = 0;
+            epoch_sst_birth_count = 0;
+        }
+        
+        // 完全清空（新实验开始时）
+        void clear() {
+            std::lock_guard<std::mutex> lock(mutex_);
+            sst_birth_time.clear();
+            total_lifetime_ms = 0;
+            total_sst_birth_count = 0;
+            epoch_lifetime_ms = 0;
+            epoch_sst_birth_count = 0;
+        }
+    };
+
     class BaseCompactor : public ROCKSDB_NAMESPACE::EventListener
     {
     public:
@@ -177,6 +273,9 @@ namespace tmpdb
 
             // 新增：统计信息
             CompactionStats stats;
+
+            // 新增：SST生命周期追踪器
+            SSTLifetimeTracker sst_lifetime_tracker;
 
             void set_memory_tuner(MemoryTuner* tuner) {
                 memory_tuner_ = tuner;
