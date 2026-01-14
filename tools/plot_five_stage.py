@@ -10,13 +10,13 @@ from pathlib import Path
 def setup_plot_style():
     """Configure matplotlib style for publication-quality figures."""
     plt.rcParams['font.family'] = 'DejaVu Sans'
-    plt.rcParams['font.size'] = 12
+    plt.rcParams['font.size'] = 18
     plt.rcParams['axes.linewidth'] = 1.2
-    plt.rcParams['axes.labelsize'] = 14
-    plt.rcParams['axes.titlesize'] = 16
-    plt.rcParams['legend.fontsize'] = 10
-    plt.rcParams['xtick.labelsize'] = 12
-    plt.rcParams['ytick.labelsize'] = 12
+    plt.rcParams['axes.labelsize'] = 20
+    plt.rcParams['axes.titlesize'] = 22
+    plt.rcParams['legend.fontsize'] = 16
+    plt.rcParams['xtick.labelsize'] = 16
+    plt.rcParams['ytick.labelsize'] = 16
     plt.rcParams['figure.dpi'] = 100
     plt.rcParams['savefig.dpi'] = 300
 
@@ -80,17 +80,17 @@ def get_color_and_marker(label):
     return color_map.get(label, '#333333'), marker_map.get(label, 'o')
 
 
-def calculate_sst_turnover(df, write_ratio):
-    alpha = df['alpha'].values
+# def calculate_sst_turnover(df, write_ratio):
+#     alpha = df['alpha'].values
     
-    # Model: τ_sst increases as α increases (fewer compactions)
-    # Using a square root relationship for smooth curve (matching reference figure)
-    tau_base = 10 + 75 * (alpha ** 0.5)
+#     # Model: τ_sst increases as α increases (fewer compactions)
+#     # Using a square root relationship for smooth curve (matching reference figure)
+#     tau_base = 10 + 75 * (alpha ** 0.5)
     
-    # Adjust based on write intensity (more writes = shorter SST lifetime)
-    tau_sst = tau_base * (1 - 0.03 * (write_ratio - 1))
+#     # Adjust based on write intensity (more writes = shorter SST lifetime)
+#     tau_sst = tau_base * (1 - 0.03 * (write_ratio - 1))
     
-    return tau_sst
+#     return tau_sst
 
 
 def plot_stage1_mbuf_flush(workloads, output_dir):
@@ -107,7 +107,7 @@ def plot_stage1_mbuf_flush(workloads, output_dir):
     
     ax.set_xlabel(r'$\alpha$', fontsize=14)
     ax.set_ylabel('Flush Count', fontsize=14)
-    ax.set_title(r'(b) Stage 1: $M_{buf} \rightarrow Flush_{count}$', fontsize=16)
+    ax.set_title(r'$M_{buf} \rightarrow Flush_{count}$', fontsize=16)
     ax.legend(loc='upper right', frameon=True, fancybox=True, shadow=True)
     ax.set_xlim(0, 1)
     ax.grid(True, alpha=0.3, linestyle='--')
@@ -126,7 +126,6 @@ def plot_stage1_mbuf_flush(workloads, output_dir):
     
     print("  Generated: stage1_mbuf_flush.png/pdf")
 
-
 def plot_stage2_flush_compaction(workloads, output_dir):
     fig, ax = plt.subplots(figsize=(8, 6))
     
@@ -141,7 +140,7 @@ def plot_stage2_flush_compaction(workloads, output_dir):
     
     ax.set_xlabel(r'$\alpha$', fontsize=14)
     ax.set_ylabel('Compaction Count', fontsize=14)
-    ax.set_title(r'(c) Stage 2: $Flush_{count} \rightarrow Compaction_{count}$', fontsize=16)
+    ax.set_title(r'$Flush_{count} \rightarrow Compaction_{count}$', fontsize=16)
     ax.legend(loc='upper right', frameon=True, fancybox=True, shadow=True)
     ax.set_xlim(0, 1)
     ax.grid(True, alpha=0.3, linestyle='--')
@@ -159,7 +158,6 @@ def plot_stage2_flush_compaction(workloads, output_dir):
     
     print("  Generated: stage2_flush_compaction.png/pdf")
 
-
 def plot_stage3_compaction_sst(workloads, output_dir):
     fig, ax = plt.subplots(figsize=(8, 6))
     
@@ -167,18 +165,19 @@ def plot_stage3_compaction_sst(workloads, output_dir):
         df = data['df']
         write_ratio = data['write_ratio']
         color, marker = get_color_and_marker(label)
-        
+
         # Calculate τ_sst based on the model
-        tau_sst = calculate_sst_turnover(df, write_ratio)
+        # tau_sst = calculate_sst_turnover(df, write_ratio)
         
-        ax.plot(df['alpha'], tau_sst,
+        # 将时间转换成s
+        ax.plot(df['alpha'], df['avg_sst_lifetime_ms'] / 1000,
                 color=color, marker=marker,
                 linewidth=2, markersize=6,
                 label=f'R:W = {label}')
     
     ax.set_xlabel(r'$\alpha$', fontsize=14)
-    ax.set_ylabel(r'$SST Invalidation Count$', fontsize=14)
-    ax.set_title(r'(d) Stage 3: $Compaction_{count} \rightarrow SST_{inv}$', fontsize=16)
+    ax.set_ylabel('Avg SST Lifetime(s)', fontsize=14)
+    ax.set_title(r'$Compaction_{count} \rightarrow \tau_{sst}$', fontsize=16)
     # ax.set_title(r'(d) Stage 3: $Compaction_{count} \rightarrow \tau_{sst}$', fontsize=16)
     ax.legend(loc='lower right', frameon=True, fancybox=True, shadow=True)
     ax.set_xlim(0, 1)
@@ -212,7 +211,7 @@ def plot_stage4_sst_cache(workloads, output_dir):
     
     ax.set_xlabel(r'$\alpha$', fontsize=14)
     ax.set_ylabel('Cache Invalidation Count', fontsize=14)
-    ax.set_title(r'(e) Stage 4: $SST_{inv} \rightarrow Cache_{inv}$', fontsize=16)
+    ax.set_title(r'$SST_{inv} \rightarrow Cache_{inv}$', fontsize=16)
     ax.legend(loc='upper right', frameon=True, fancybox=True, shadow=True)
     ax.set_xlim(0, 1)
     ax.grid(True, alpha=0.3, linestyle='--')
@@ -253,13 +252,13 @@ def main():
     parser.add_argument(
         '--input_dir', '-i',
         type=str,
-        default='.',
+        default='data/five_stage_chian',
         help='Directory containing CSV result files (default: current directory)'
     )
     parser.add_argument(
         '--output_dir', '-o',
         type=str,
-        default='./output',
+        default='./data/five_stage_chian/output',
         help='Directory for output figures (default: ./output)'
     )
     
