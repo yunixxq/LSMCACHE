@@ -21,7 +21,7 @@ np.set_printoptions(suppress=True)
 
 # 基础特征
 BASE_FEATURE_NAMES = [
-    'read_ratio', 'write_ratio', 'skewness', 'T',
+    'read_write_ratio', 'skewness', 'T',
     'M_MB', 'N_over_M', 'alpha', 
     # 'Mbuf_MB', 'Mcache_MB',
 ]
@@ -36,7 +36,7 @@ EXTEND_FEATURE_NAMES = [
 FULL_FEATURE_NAMES = BASE_FEATURE_NAMES + EXTEND_FEATURE_NAMES
 
 class ModelEvaluator:
-    def __init__(self, config_path: str = "motivating_exp/config/config_sampling_exp_full.yaml"):
+    def __init__(self, config_path: str = "motivating_exp/config/config_sampling_exp.yaml"):
         """加载配置"""
         with open(config_path) as f:
             self.config = yaml.load(f, Loader=yaml.FullLoader)
@@ -57,7 +57,7 @@ class ModelEvaluator:
     
     def load_data(self) -> pd.DataFrame:
         """加载采样数据"""
-        data_path = "data/sampling_exp_results_full.csv"
+        data_path = "data/sampling_exp_results.csv"
         # self.config["output_path"]["sampling_exp_output"]
         self.logger.info(f"Loading data from: {data_path}")
         samples = pd.read_csv(data_path)

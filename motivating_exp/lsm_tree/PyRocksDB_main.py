@@ -36,18 +36,23 @@ class RocksDB(object):
         write_num_2: float,
         dist: str,
         skew: float,
-        # RL 相关指标
-        rl_step: float,
-        rl_max_epochs: int,
-        rl_conv_win: int,
-        rl_imp_thre: float,
-        epoch_ops: int,
+        # RL 相关参数（新版UCB+Q-Learning）
+        rl_step: float = 0.05,
+        rl_learning_rate: float = 0.1,
+        rl_discount: float = 0.9,
+        rl_epsilon_start: float = 0.3,
+        rl_epsilon_decay: float = 0.95,
+        rl_epsilon_min: float = 0.05,
+        rl_ucb_c: float = 1.414,
+        epoch_ops: int = 10000,
+        # 控制参数
+        enable_rl_tuning: bool = True,      # 是否启用RL调优
+        enable_jump_start: bool = True,    # 是否启用漂移检测和Jump Start
         # 输出文件目录
         exp_output_file: str = "/data/main_results.csv",
         epoch_output_file: str = "/data/epoch_results.csv",
         is_leveling_policy: bool = True,
     ) -> Dict:
-        """运行 Motivating Experiment"""
         
         self.path_db = path_db
         self.db_name = db_name
@@ -81,13 +86,28 @@ class RocksDB(object):
             f"--parallelism {THREADS}",
             f"-o1 {exp_output_file}",
             f"-o2 {epoch_output_file}",
+            # RL参数（新版）
             f"--rl-step {rl_step}",
-            f"--rl-max-epochs {rl_max_epochs}",
-            f"--rl-conv-window {rl_conv_win}",
-            f"--rl-threshold {rl_imp_thre}",
+            f"--rl-learning-rate {rl_learning_rate}",
+            f"--rl-discount {rl_discount}",
+            f"--rl-epsilon-start {rl_epsilon_start}",
+            f"--rl-epsilon-decay {rl_epsilon_decay}",
+            f"--rl-epsilon-min {rl_epsilon_min}",
+            f"--rl-ucb-c {rl_ucb_c}",
             f"--epoch-ops {epoch_ops}",
             "--append", 
         ]
+
+        # 🆕 添加控制参数
+        if enable_rl_tuning:
+            cmd.append("--rl-agent")
+        else:
+            cmd.append("--no-rl-agent")
+        
+        if enable_jump_start:
+            cmd.append("--jump-start")
+        else:
+            cmd.append("--no-jump-start")
         
         cmd_str = " ".join(cmd)
         self.logger.info(f"Executing command: {cmd_str}")

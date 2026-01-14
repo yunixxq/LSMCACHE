@@ -16,9 +16,11 @@ def estimate_level(N, M, alpha, T, E):
 
 def build_features(N, M_MB, T, alpha, r, w, s, feature_type: str = "full") -> list:
     data_size_mb = N * E / (1024 * 1024)
+    read_write_ratio = r / w
     base_features = [
-        r, 
-        w,
+        # r, 
+        # w,
+        read_write_ratio,
         s, # skewness
         T,
         M_MB,
@@ -31,7 +33,7 @@ def build_features(N, M_MB, T, alpha, r, w, s, feature_type: str = "full") -> li
     
     M = M_MB * 1024 * 1024
     L = estimate_level(N, M, alpha, T, E)
-    Wamp = L * T
+    Wamp = L * T / alpha
 
     extend_features = [
         L,

@@ -11,6 +11,8 @@
 
 #include "clipp.h"
 #include "spdlog/spdlog.h"
+#include "spdlog/sinks/basic_file_sink.h"
+#include "spdlog/sinks/stdout_color_sinks.h"
 
 #include "rocksdb/db.h"
 #include "rocksdb/options.h"
@@ -27,6 +29,7 @@
 #include "infrastructure/data_generator.hpp"
 #include "tmpdb/memory_tuner.hpp"
 #include "tmpdb/progress_bar.hpp"
+#include "tmpdb/rl_tuner.hpp"
 
 using namespace ROCKSDB_NAMESPACE;
 
@@ -47,27 +50,6 @@ struct StatsSnapshot {
                       user_read_bytes(0) {}
 };
 
-// Baseline性能指标 - 用于归一化计算Score
-struct Baseline {
-    double H_cache;
-    double latency_ms;
-    double total_io_kb_per_op;
-    bool is_set;
-    
-    Baseline() : H_cache(0), latency_ms(0), total_io_kb_per_op(0), is_set(false) {}
-    
-    void set(double h, double lat, double io) {
-        H_cache = h;
-        latency_ms = lat;
-        total_io_kb_per_op = io;
-        is_set = true;
-    }
-    
-    void reset() {
-        is_set = false;
-    }
-};
-
 // 单个Epoch的性能统计
 struct EpochStats {
     int epoch_id;               // Epoch编号
@@ -83,10 +65,7 @@ struct EpochStats {
     
     // 综合性能分数 (用于RL决策)
     double performance_score;
-    
-    // 事件标记
-    std::string event;          // "warmstart", "rl_tune", "drift_detected", "converged"
-    
+
     std::string to_csv() const {
         std::ostringstream oss;
         oss << std::fixed << std::setprecision(6)
@@ -98,15 +77,14 @@ struct EpochStats {
             << write_io_kb_per_op << ","
             << read_io_kb_per_op << ","
             << total_io_kb_per_op << ","
-            << performance_score << ","
-            << event;
+            << performance_score;
         return oss.str();
     }
     
     static std::string csv_header() {
         return "epoch_id,alpha,queries,H_cache,latency_ms,"
                "write_io_kb_per_op,read_io_kb_per_op,total_io_kb_per_op,"
-               "performance_score,event";
+               "performance_score";
     }
 };
 
@@ -149,6 +127,10 @@ struct ExpResult
     int drift_count;            // 漂移检测次数
     bool converged;             // 是否收敛
 
+    // 消融实验设置
+    bool rl_agent_enabled;
+    bool jump_start_enabled;
+
     std::string to_csv() const {
         std::ostringstream oss;
         oss << std::fixed << std::setprecision(6)
@@ -170,7 +152,9 @@ struct ExpResult
             << latency << ","
             << rl_epochs_count << ","    // 🆕
             << drift_count << ","        // 🆕
-            << (converged ? "true" : "false");
+            << (converged ? "true" : "false") << ","
+            << (rl_agent_enabled ? "true" : "false") << ","
+            << (jump_start_enabled ? "true" : "false");
         return oss.str();
     }
     
@@ -179,7 +163,7 @@ struct ExpResult
             "read_ratio_1,write_ratio_1,read_ratio_2,write_ratio_2,"  // ✅ 4个字段
             "alpha_initial,alpha_final,Mbuf_MB,Mcache_MB,"
             "H_cache,write_io_kb_per_op,read_io_kb_per_op,total_io_kb_per_op,"
-            "latency,rl_epochs_count,drift_count,converged";
+            "latency,rl_epochs_count,drift_count,converged,rl_agent_enabled,jump_start_enabled";
     }
 
     // 输出alpha历史
@@ -203,37 +187,6 @@ struct ExpResult
             }
             ofs.close();
         }
-    }
-};
-
-// RL tuner
-struct RLState {
-    double current_alpha;
-    double best_alpha;
-    double best_score;
-    int direction;              // 1: 增加alpha, -1: 减少alpha
-    int no_improve_count;
-    bool converged;
-    bool is_first_epoch;        // 是否是当前workload的第一个epoch
-    
-    void init(double alpha) {
-        current_alpha = alpha;
-        best_alpha = alpha;
-        best_score = -std::numeric_limits<double>::infinity(); // -∞
-        direction = 1;
-        no_improve_count = 0;
-        converged = false;
-        is_first_epoch = true;
-    }
-    
-    void reset_for_new_workload(double alpha) {
-        current_alpha = alpha;
-        best_alpha = alpha;
-        best_score = -std::numeric_limits<double>::infinity();
-        direction = 1;
-        no_improve_count = 0;
-        converged = false;
-        is_first_epoch = true;
     }
 };
 
@@ -263,21 +216,27 @@ typedef struct environment
     size_t L = 0;
     size_t M = 0; // 总内存预算
 
+    size_t epoch_length = 10000; // 每多少次操作执行一次RL-tune
+
     // RL 配置
     double rl_step_size = 0.05;
-    int rl_max_epochs = 20;
-    int rl_convergence_window = 3;
-    double rl_improvement_threshold = 0.005;
-    size_t epoch_length = 10000; // 每多少次操作执行一次RL-tune
+    double rl_learning_rate = 0.1;   // Q-learning学习率
+    double rl_discount_factor = 0.9;
+    double rl_epsilon_start = 0.3;  // 初始探索率
+    double rl_epsilon_decay = 0.95;  // 探索率衰减 
+    double rl_epsilon_min = 0.05;  // 最小探索率
+    double rl_ucb_c = 1.414; // UCB 探索系数
 
     // 性能权重(用于计算综合分数)
     double weight_hit_rate = 0.4;
     double weight_latency = 0.3;
     double weight_io = 0.3;
 
-    bool enable_rl_tuning = true;
-
     double drift_threshold = 0.15;  // 读比例变化超过此值触发漂移
+
+    // 消融实验
+    bool enable_rl_tuning = true;     // 是否启用RL调优
+    bool enable_jump_start = true;    // 是否启用漂移检测和Jump Start
 
     // 输出文件
     std::string exp_output_file = "/data/main_results.csv";  // 实验输出文件
@@ -332,14 +291,21 @@ environment parse_args(int argc, char *argv[])
         (option("-o1", "--output1") & value("file", env.exp_output_file)) % "output CSV file",
         (option("-o2", "--output2") & value("file", env.epoch_output_file)) % "output CSV file",
         (option("--append").set(env.append_mode, true)) % "append to output file (no header)",
-        (option("--drift-threshold") & number("val", env.drift_threshold)) % "Drift detection threshold"
+        (option("--drift-threshold") & number("val", env.drift_threshold)) % "Drift detection threshold",
+        (option("--rl-agent").set(env.enable_rl_tuning, true)) % "Enable RL agent tuning",
+        (option("--no-rl-agent").set(env.enable_rl_tuning, false)) % "Disable RL agent tuning",
+        (option("--jump-start").set(env.enable_jump_start, true)) % "Enable drift detection and jump start",
+        (option("--no-jump-start").set(env.enable_jump_start, false)) % "Disable drift detection"
     );
 
     auto rl_opt = "RL tuning options:" % (
         (option("--rl-step") & number("step", env.rl_step_size)) % "RL step size",
-        (option("--rl-max-epochs") & integer("num", env.rl_max_epochs)) % "Max RL epochs",
-        (option("--rl-conv-window") & integer("num", env.rl_convergence_window)) % "Convergence window",
-        (option("--rl-threshold") & number("val", env.rl_improvement_threshold)) % "Improvement threshold",
+        (option("--rl-learning-rate") & number("val", env.rl_learning_rate)) % "Q-learning rate",
+        (option("--rl-discount") & number("val", env.rl_discount_factor)) % "Discount factor",
+        (option("--rl-epsilon-start") & number("val", env.rl_epsilon_start)) % "Initial epsilon",
+        (option("--rl-epsilon-decay") & number("val", env.rl_epsilon_decay)) % "Epsilon decay rate",
+        (option("--rl-epsilon-min") & number("val", env.rl_epsilon_min)) % "Min epsilon",
+        (option("--rl-ucb-c") & number("val", env.rl_ucb_c)) % "UCB coefficient",
         (option("--epoch-ops") & integer("num", env.epoch_length)) % "Queries per RL epoch"
     );
 
@@ -437,14 +403,12 @@ EpochStats calculate_epoch_stats(
     const StatsSnapshot& end_snap,
     int epoch_id,
     double alpha,
-    size_t queries,
-    const std::string& event)
+    size_t queries)
 {
     EpochStats stats;
     stats.epoch_id = epoch_id;
     stats.alpha = alpha;
     stats.queries = queries;
-    stats.event = event;
     
     // 计算时间增量
     stats.latency_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -488,37 +452,35 @@ void reset_all_statistics(rocksdb::Options &rocksdb_opt,
     }
 }
 
-// 计算综合性能分数(越高越好) - 归一化的综合性能分数
-/*
-    score = w1 * (H_cache / baseline_H) 
-        - w2 * (latency / baseline_latency) 
-        - w3 * (io / baseline_io)
-
-    归一化后各指标的量级相当，权重才会有意义
-*/
-double calculate_performance_score(
-    const EpochStats& stats,
-    const Baseline& baseline,
-    const environment& env)
-{
-    // 归一化各指标 (相对于baseline)
-    double norm_H = (baseline.H_cache > 0) ? 
-        stats.H_cache / baseline.H_cache : stats.H_cache;
-    double norm_latency = (baseline.latency_ms > 0) ? 
-        stats.latency_ms / baseline.latency_ms : 1.0;
-    double norm_io = (baseline.total_io_kb_per_op > 0) ? 
-        stats.total_io_kb_per_op / baseline.total_io_kb_per_op : 1.0;
-    
-    // 综合分数: H越高越好(+)，latency和IO越低越好(-)
-    double score = env.weight_hit_rate * norm_H 
-                 - env.weight_latency * norm_latency 
-                 - env.weight_io * norm_io;
-    
-    return score;
-}
-
 int run_experiment(environment &env)
 {
+    // ==================== 配置日志信息 ====================
+    // 配置双输出日志：控制台只输出警告以上，文件输出所有info
+    auto console_sink = std::make_shared<spdlog::sinks::stdout_color_sink_mt>();
+    console_sink->set_level(spdlog::level::warn);  // 控制台只显示警告和错误
+
+    string output_name;
+    if(env.enable_rl_tuning && env.enable_jump_start){
+        output_name = "rl_on_js_on";
+    } else if(!env.enable_rl_tuning && !env.enable_jump_start){
+        output_name = "rl_off_js_off";
+    } else if(env.enable_rl_tuning && !env.enable_jump_start){
+        output_name = "rl_on_js_off";
+    } else {
+        output_name = "rl_off_js_on";
+    }
+ 
+
+    std::string log_file = "./data/online_tuning_log_" + output_name + ".txt";
+    auto file_sink = std::make_shared<spdlog::sinks::basic_file_sink_mt>(log_file, true);
+    file_sink->set_level(spdlog::level::info);  // 文件记录所有info
+
+    auto logger = std::make_shared<spdlog::logger>("tuner_logger", 
+        spdlog::sinks_init_list{console_sink, file_sink});
+    logger->set_level(spdlog::level::info);
+    spdlog::set_default_logger(logger);
+    spdlog::set_pattern("[%Y-%m-%d %T.%e][%l] %v");
+
     ExpResult result;
 
     result.M = env.M;
@@ -537,7 +499,10 @@ int run_experiment(environment &env)
     result.drift_count = 0;
     result.converged = false;
 
-    // ✅ 计算初始情况下的内存分配-写内存+块缓存
+    result.rl_agent_enabled = env.enable_rl_tuning;
+    result.jump_start_enabled = env.enable_jump_start;
+
+    // 计算初始情况下的内存分配-写内存+块缓存
     size_t Mbuf = static_cast<size_t>(env.alpha1 * env.M);
     size_t Mcache = env.M - Mbuf;
     
@@ -612,6 +577,22 @@ int run_experiment(environment &env)
 
     rocksdb_opt.statistics = rocksdb::CreateDBStatistics();
     
+    // ==================== 配置 RL-Tuner ====================
+    tmpdb::RLConfig rl_config;
+    rl_config.step_size = env.rl_step_size;
+    rl_config.learning_rate = env.rl_learning_rate;
+    rl_config.discount_factor = env.rl_discount_factor;
+    rl_config.epsilon_start = env.rl_epsilon_start;
+    rl_config.epsilon_decay = env.rl_epsilon_decay;
+    rl_config.epsilon_min = env.rl_epsilon_min;
+    rl_config.ucb_c = env.rl_ucb_c;
+
+    tmpdb::RLTuner rl_tuner(rl_config);
+    rl_tuner.init(env.alpha1, env.read_ratio_1);
+    if (env.seed != 0) {
+        rl_tuner.set_seed(env.seed);
+    }
+
     // ==================== 打开数据库 ====================
     rocksdb::DB *db = nullptr;
     rocksdb::Status status = rocksdb::DB::Open(rocksdb_opt, db_path, &db);
@@ -652,7 +633,6 @@ int run_experiment(environment &env)
     spdlog::info("Waiting for initial compactions to finish...");
     wait_for_compactions(db, compactor);
     
-
     delete data_gen;
     
     // 2️⃣ 预热阶段：执行1/4的总的操作数量
@@ -699,18 +679,16 @@ int run_experiment(environment &env)
 
     auto time_start = std::chrono::high_resolution_clock::now(); 
 
-    // 初始化强化学习相关内容
-    RLState rl_state;
-    rl_state.init(env.alpha1);
-
-    Baseline baseline;
-
     int current_epoch = 0;
     size_t epoch_ops = 0;
     StatsSnapshot epoch_start_snap = get_current_stats_snapshot(rocksdb_opt);
     
     double read_ratio = 0;
-    int last_read_ops = 0, curr_read_ops = 0;
+    int curr_read_ops = 0;
+
+    // 设置为1是因为我们的epoch足够大
+    tmpdb::DriftDetector drift_detector(env.drift_threshold, 1);
+    result.alpha_history.push_back(env.alpha1); // 初始化
     // 混合负载主循环-进度条显示
     {
         ProgressBar progress(env.queries, "🔄 Mixed R/W  ");
@@ -735,124 +713,74 @@ int run_experiment(environment &env)
             epoch_ops = epoch_ops + 1;
 
             if(epoch_ops >= env.epoch_length){
-                // 获取当前累积的统计快照
+                // 获取当前累积的统计快照(end) + 计算本epoch内的增量统计(end - satrt)
                 StatsSnapshot epoch_end_snap = get_current_stats_snapshot(rocksdb_opt);
-
-                // 计算本epoch内的增量统计
                 EpochStats epoch_stats = calculate_epoch_stats(
                     epoch_start_snap, epoch_end_snap,
-                    current_epoch, rl_state.current_alpha, epoch_ops,
-                    rl_state.is_first_epoch ? "baseline" : "rl_tune");
+                    current_epoch, rl_tuner.current_alpha(), epoch_ops);
 
                 // 首先检查是否发生漂移 - 若漂移则JumpStart 不用RL-tune
-                bool drift_occurred = false;
-                if(current_epoch > 0) {
-                    double curr_read_ratio = static_cast<double>(curr_read_ops) / epoch_ops;
-                    double last_read_ratio = static_cast<double>(last_read_ops) / epoch_ops;
+                double curr_read_ratio = static_cast<double>(curr_read_ops) / epoch_ops;
+                bool drift = drift_detector.observe(curr_read_ratio);
 
-                    if(std::abs(curr_read_ratio - last_read_ratio) > env.drift_threshold){
-                        spdlog::info("🚨 Drift detected! curr_ratio={:.3f}, last_ratio={:.3f}", 
-                        curr_read_ratio, last_read_ratio);
-                        
-                        drift_occurred = true;
-                        result.drift_count++;
-                        epoch_stats.event = "drift_detected";
-                        
-                        apply_memory_allocation(db, block_cache, compactor, env.M, env.alpha2);
-                        rl_state.reset_for_new_workload(env.alpha2);
-                        baseline.reset();
-                    }
+                double new_alpha;
 
-                }
+                if(drift && env.enable_jump_start){
+                   spdlog::info("🚨 Drift detected!");
+                   rl_tuner.on_drift_detected(env.alpha2, curr_read_ratio);
+                   new_alpha = env.alpha2;
+                   result.drift_count++; 
+                } else if(env.enable_rl_tuning){ // 正常RL更新
+                    tmpdb::EpochPerf perf(epoch_stats.H_cache, epoch_stats.latency_ms,
+                              epoch_stats.total_io_kb_per_op, curr_read_ratio);
 
-                // 更新读操作数
-                last_read_ops = curr_read_ops;
-                curr_read_ops = 0;
-
-                if(drift_occurred) {
-                    // drift发生时，当前epoch的统计是用旧alpha执行的，不能作为新baseline
-                    // 只记录drift事件，不设置baseline，不做RL决策
-                    // is_first_epoch 已经设置为true，下一个epoch会自动设置baseline
-                    spdlog::info("📊 Epoch[{}] DRIFT: alpha switched to {:.3f}, next epoch will be new baseline",
-                        current_epoch, env.alpha2);
-                } else if(rl_state.is_first_epoch){
-                    // 当前workload的第一个完整epoch，设置为baseline
-                    baseline.set(epoch_stats.H_cache, epoch_stats.latency_ms, 
-                                epoch_stats.total_io_kb_per_op);
-                    epoch_stats.performance_score = 0;
-                    rl_state.best_score = 0;
-                    rl_state.is_first_epoch = false;
-                    epoch_stats.event = "baseline";
-                    
-                    spdlog::info("📊 Epoch[{}] BASELINE: alpha={:.3f}, H={:.4f}, lat={:.0f}ms, IO={:.3f}KB/op",
-                                current_epoch, rl_state.current_alpha, 
-                                epoch_stats.H_cache, epoch_stats.latency_ms,
-                                epoch_stats.total_io_kb_per_op);
-                } else {
-                    // 正常epoch - RL决策
-                    epoch_stats.performance_score = calculate_performance_score(
-                        epoch_stats, baseline, env);
-
-                    spdlog::info("📊 Epoch[{}]: alpha={:.3f}, H={:.4f}, lat={:.0f}ms, IO={:.3f}KB/op, score={:.4f}",
-                                 current_epoch, rl_state.current_alpha,
-                                 epoch_stats.H_cache, epoch_stats.latency_ms,
-                                 epoch_stats.total_io_kb_per_op, epoch_stats.performance_score); 
-
-                    // 进行RL决策
-                    if (env.enable_rl_tuning && !rl_state.converged) {
-                        double improvement = epoch_stats.performance_score - rl_state.best_score;
-
-                        if (improvement > env.rl_improvement_threshold){ // 改进则继续当前方向
-                            spdlog::info("   ✅ Improved by {:.4f}, continue {}", 
-                                        improvement, rl_state.direction > 0 ? "↑" : "↓");
-                            rl_state.best_score = epoch_stats.performance_score;
-                            rl_state.best_alpha = rl_state.current_alpha;
-                            rl_state.no_improve_count = 0;
-                        } else { // 没有改进 / 下降则反转方向
-                            spdlog::info("   ⬇️ No improvement ({:.4f}), reverse direction", improvement);
-                            rl_state.direction = -rl_state.direction;
-                            rl_state.no_improve_count++;
-                        }
-
-                        // 收敛检查
-                        if (rl_state.no_improve_count >= env.rl_convergence_window) {
-                            spdlog::info("🎉 Converged at alpha = {:.3f}", rl_state.best_alpha);
-                            rl_state.converged = true;
-                            rl_state.current_alpha = rl_state.best_alpha;
-                            apply_memory_allocation(db, block_cache, compactor, env.M, rl_state.best_alpha);
-                            result.converged = true;
-                            
-                            epoch_stats.event = "converged";
-                        } else {
-                            double new_alpha = rl_state.current_alpha + rl_state.direction * env.rl_step_size;
-                            new_alpha = std::max(0.05, std::min(0.95, new_alpha));
-
-                            if (std::abs(new_alpha - rl_state.current_alpha) > 0.001) {
-                                rl_state.current_alpha = new_alpha;
-                                apply_memory_allocation(db, block_cache, compactor, env.M, new_alpha);
-                                spdlog::info("   🔧 Adjust alpha to {:.3f}", new_alpha);
-                            }
-                        }
+                    if (rl_tuner.is_converged()) {
+                        // 已收敛，保持当前alpha不变 - 不实际执行RL
+                        new_alpha = rl_tuner.current_alpha();
+                        spdlog::info("   ✅ Converged, keeping alpha={:.3f}", new_alpha);
+                    } else {
+                        new_alpha = rl_tuner.on_epoch_end(perf);
                         result.rl_epochs_count++;
                     }
+                } else { // baseline模式 - 消融实验
+                    new_alpha = rl_tuner.current_alpha();
+                    spdlog::info("   📌 Static: α = {:.3f} (no tuning)", new_alpha);
                 }
 
-                // 记录epoch的统计
-                result.epoch_stats.push_back(epoch_stats);
-                result.alpha_history.push_back(rl_state.current_alpha);
+                // 应用新的alpha
+                if (std::abs(new_alpha - result.alpha_history.back()) > 0.001) {
+                    apply_memory_allocation(db, block_cache, compactor, env.M, new_alpha);
+                    spdlog::info("   🔧 {} alpha: {:.3f} → {:.3f}", 
+                                tmpdb::action_to_string(rl_tuner.last_action()),
+                                result.alpha_history.back(), new_alpha);
+                }
 
-                epoch_ops = 0; // 重置
+                if (drift) {
+                    epoch_stats.performance_score = 0.0;  // drift时没有RL计算，设为0
+                } else {
+                    epoch_stats.performance_score = rl_tuner.last_reward();
+                }
+                
+                spdlog::info("📊 Epoch[{}]: α={:.3f}, H={:.4f}, {}", 
+                            current_epoch, new_alpha, epoch_stats.H_cache,
+                            rl_tuner.get_stats_string());
+                
+                result.epoch_stats.push_back(epoch_stats);
+                result.alpha_history.push_back(new_alpha);
+
+                // 重置
+                curr_read_ops = 0;
+                epoch_ops = 0;
                 current_epoch++;
                 epoch_start_snap = epoch_end_snap;
-
             }
-
             progress.update();
         }
         progress.finish();
     }
 
-    result.alpha_final = rl_state.best_alpha;
+    result.alpha_final = rl_tuner.current_alpha();
+    result.converged = rl_tuner.is_converged();
     wait_for_compactions(db, compactor);
     
     auto time_end = std::chrono::high_resolution_clock::now();
