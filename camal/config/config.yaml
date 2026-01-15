@@ -1,0 +1,52 @@
+app:
+    app_name: "camal"
+    app_logging_level: "INFO"
+
+    ROOT_DIR: "camal"
+    DATA_DIR: "data"
+
+    EXECUTION_PATH: "build/db_runner_camal"
+    DATABASE_PATH: "/data"
+
+output_path:
+    sampling_output: "data/camal/sampling.csv"
+    main_exp_output: "data/camal/main_result.csv"
+
+xgb_model:
+    camal_xgb_cost_model: "data/camal/train_camal_xgb_cost.pkl"
+
+# lsm_tree_config:
+#     E: 1024              # Entry size: 1KB bytes/entry
+#     M: 1073741824        # Total memory: 1GB bytes (可调整为 4GB = 4294967296)
+#     N: 10000000          # 初始化 entry 数量: 1000万条记录 (~10GB 数据)
+#     Q: 10000000          # 查询数量: 1000万 (每个 alpha 值)
+#     s: 4                 # Range query selectivity
+#     T: 5                 # Size ratio
+#     h: 5                 # Bloom filter bits per element
+
+lsm_tree_config:
+    E: 1024              # Entry size: 1KB bytes/entry
+    M: 536870912        # Total memory: 512MB bytes 
+    N: 5000000          # 初始化 entry 数量: 500万条记录 (~10GB 数据)
+    Q: 5000000          # 查询数量: 500万 (每个 alpha 值)
+    s: 4                 # Range query selectivity
+    T: 6                 # Size ratio
+    h: 5                 # Bloom filter bits per element
+
+jobs:
+    job_list:
+        - "run_experiments"
+
+# experiments:
+#     expt_list:
+#         - "LevelCost"
+
+
+
+# samples_path:
+#     camal_xgb_ckpt: "data/samples_camal_xgb_ckpt"
+#     camal_xgb_final: "data/samples_camal_xgb_final"
+
+# optimizer_path:
+#     camal_ckpt: "data/optimizer_camal_ckpt.csv"
+#     camal_final: "data/optimizer_camal_final.csv"
