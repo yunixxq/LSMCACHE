@@ -1,0 +1,22 @@
+app:
+    app_name: "default"
+    app_logging_level: "INFO"
+
+    ROOT_DIR: "default"
+    DATA_DIR: "data"
+
+    EXECUTION_PATH: "build/db_runner_default"
+    DATABASE_PATH: "/data"
+
+output_path:
+    main_exp_output: "data/default/main_result.csv"
+
+lsm_tree_config:
+    E: 1024              # Entry size: 1KB bytes/entry
+    M: 4294967296        # Total memory: 1GB = 1073741824 bytes / 4GB = 4294967296 / 20GB = 21474836480
+    N: 100000000         # 初始化 entry 数量: 10000万条记录
+    Q: 50000000          # 查询数量: 5000万
+    s: 4                 # Range query selectivity
+    T: 5                 # Size ratio
+    h: 5                 # bpe
+

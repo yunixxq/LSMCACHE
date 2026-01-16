@@ -21,7 +21,7 @@ np.set_printoptions(suppress=True)
 
 # 基础特征
 BASE_FEATURE_NAMES = [
-    'read_write_ratio', 'skewness', 'T',
+    'read_write_ratio', 'skewness',
     'M_MB', 'N_over_M', 'alpha', 
     # 'Mbuf_MB', 'Mcache_MB',
 ]
@@ -57,7 +57,7 @@ class ModelEvaluator:
     
     def load_data(self) -> pd.DataFrame:
         """加载采样数据"""
-        data_path = "data/sampling_exp_results.csv"
+        data_path = "data/calm/sampling_exp_results.csv"
         # self.config["output_path"]["sampling_exp_output"]
         self.logger.info(f"Loading data from: {data_path}")
         samples = pd.read_csv(data_path)
@@ -67,7 +67,6 @@ class ModelEvaluator:
         return samples
     
 
-    
     def prepare_data(self, samples: pd.DataFrame, feature_type: str = "full"):
         """准备训练数据"""
         X = []

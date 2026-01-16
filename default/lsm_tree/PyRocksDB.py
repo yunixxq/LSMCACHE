@@ -18,24 +18,23 @@ class RocksDB(object):
         
     def run(
         self,
-        db_name,
-        path_db,
-        h,
-        T,
-        N,
-        E, # bytes
-        M, # bytes
-        Q, 
-        initial_mbuf, # bytes
-        read_num_1,
-        write_num_1,
-        read_num_2,
-        write_num_2,
-        dist,
-        skew,
-        exp_output_file,
-        sel=0,
-        is_leveling_policy=True,
+        db_name: str,
+        path_db: str,
+        h: int,
+        T: int,
+        N: int,
+        E: int,
+        M: int,
+        Q: int,
+        # 工作负载
+        read_num_1: float,
+        write_num_1: float,
+        read_num_2: float,
+        write_num_2: float,
+        dist: str,
+        skew: float,
+        exp_output_file: str = "/data/main_results.csv",
+        is_leveling_policy: bool = True,
     ) -> Dict:
         
         self.path_db = path_db
@@ -50,24 +49,22 @@ class RocksDB(object):
 
         # 构建执行命令
         cmd = [
-            self.config["app"]["EXECUTION_PATH"], # db_runner / db_runner_dynamic
+            self.config["app"]["EXECUTION_PATH"],
             db_dir,
             f"-N {N}",
             f"-T {T}",
-            f"-B {initial_mbuf}",
             f"-M {M}",
             f"-E {E}",
             f"-b {h}",
+            f"-s {Q}",          
             f"-r1 {read_num_1}",
             f"-w1 {write_num_1}",
             f"-r2 {read_num_2}",
             f"-w2 {write_num_2}",
-            f"-s {Q}",
-            f"-c {self.compaction_style}",
-            f"--sel {sel}",
-            f"--parallelism {THREADS}",
             f"--dist {dist}",
             f"--skew {skew}",
+            f"-c {self.compaction_style}",
+            f"--parallelism {THREADS}",
             f"-o {exp_output_file}",
         ]
 
@@ -90,6 +87,5 @@ class RocksDB(object):
         except subprocess.TimeoutExpired:
             self.logger.warning("Timeout limit reached. Aborting process.")
             proc.kill()
-
-        return {}
         
+        return {}

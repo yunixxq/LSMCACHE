@@ -315,7 +315,10 @@ int run_experiment(environment &env)
     // 销毁旧数据库
     rocksdb::DestroyDB(db_path, rocksdb::Options());
     std::string rm_db_cmd = "rm -rf " + db_path;
-    system(rm_db_cmd.c_str());
+    int ret = system(rm_db_cmd.c_str());
+    if (ret != 0) {
+        spdlog::warn("Failed to execute: {}, return code: {}", rm_db_cmd, ret);
+    }
 
     // ==================== 配置 RocksDB ====================
     rocksdb::Options rocksdb_opt;
@@ -579,7 +582,10 @@ int run_experiment(environment &env)
     delete data_gen;
     
     rocksdb::DestroyDB(db_path, rocksdb::Options());
-    system(rm_db_cmd.c_str());
+    ret = system(rm_db_cmd.c_str());
+    if (ret != 0) {
+        spdlog::warn("Failed to execute: {}, return code: {}", rm_db_cmd, ret);
+    }
     // ==================== 保存结果 ====================
     std::ofstream ofs;
     if (env.append_mode) {

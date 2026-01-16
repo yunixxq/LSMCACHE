@@ -7,29 +7,29 @@ import yaml
 import copy
 import random
 import pickle as pkl
+import threading
+import time
 
-sys.path.append("./memory_tuner")
-from memory_tuner_runner import Runner
+sys.path.append("./default")
+from default_runner import Runner
 from lsm_tree.PyRocksDB import RocksDB
+from lsm_tree.lsm import predict_best_alpha
 
 np.set_printoptions(suppress=True)
 
 # ============ 加载全局配置文件 ============
-config_yaml_path = os.path.join("memory_tuner/config/config_memory_tuner.yaml")
+config_yaml_path = os.path.join("default/config/config.yaml")
 with open(config_yaml_path) as f:
     config = yaml.load(f, Loader=yaml.FullLoader)
 
-skewness_values = [0.7, 0.8, 0.9, 0.99]
+# skewness_values = [0.7, 0.8, 0.9, 0.99]
+skewness_values = [0.8, 0.9, 0.99]
 
 workloads = [
-    (0.90, 0.10), 
-    (0.85, 0.15),
-    (0.80, 0.20),
-    (0.75, 0.25),
+    # (0.90, 0.10), 
+    # (0.80, 0.20),
     (0.70, 0.30),
-    (0.65, 0.35),
     (0.60, 0.40),
-    (0.55, 0.45),
     (0.50, 0.50),
 ]
 
@@ -56,7 +56,6 @@ class MainExp(object):
         E = self.config["lsm_tree_config"]["E"]
         M = self.config["lsm_tree_config"]["M"]  # Bytes
         Q = self.config["lsm_tree_config"]["Q"]
-        initial_mbuf = self.config["lsm_tree_config"]["B"]
         
         total_experiments = len(skewness_values) * len(workloads)
         current_exp = 0
@@ -77,7 +76,6 @@ class MainExp(object):
                     E=E,
                     M=M,
                     Q=Q,
-                    initial_mbuf=initial_mbuf,
                     read_num_1=read_ratio,
                     write_num_1=write_ratio,
                     read_num_2=read_ratio,
@@ -96,7 +94,7 @@ if __name__ == "__main__":
     if len(sys.argv) > 1:
         config_yaml_path = sys.argv[1]
     else:
-        config_yaml_path = os.path.join("memory_tuner/config/config_memory_tuner.yaml")
+        config_yaml_path = os.path.join("default/config/config.yaml")
 
     with open(config_yaml_path) as f:
         config = yaml.load(f, Loader=yaml.FullLoader)

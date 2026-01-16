@@ -22,7 +22,7 @@ config_yaml_path = os.path.join("camal/config/config.yaml")
 with open(config_yaml_path) as f:
     config = yaml.load(f, Loader=yaml.FullLoader)
 
-skewness_values = [0.7, 0.8, 0.9, 0.99]
+skewness_values = [0.99]
 # skewness_values = [0.99]
 
 # read_ratio1, write_ratio1 = 0.5, 0.5

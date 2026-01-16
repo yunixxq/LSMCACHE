@@ -140,17 +140,20 @@ add_library(tools OBJECT ${TOOLS_SRCS})
 target_link_libraries(tools PUBLIC tmpdb)
 
 # Tools executables
-add_executable(db_runner ${CMAKE_SOURCE_DIR}/tools/db_runner.cpp)
-target_link_libraries(db_runner tmpdb tools)
-
-add_executable(db_runner_dynamic ${CMAKE_SOURCE_DIR}/tools/db_runner_dynamic.cpp)
-target_link_libraries(db_runner_dynamic tmpdb tools)
+add_executable(db_runner_camal ${CMAKE_SOURCE_DIR}/tools/db_runner_camal.cpp)
+target_link_libraries(db_runner_camal tmpdb tools)
 
 add_executable(db_runner_with_tuner ${CMAKE_SOURCE_DIR}/tools/db_runner_with_tuner.cpp)
 target_link_libraries(db_runner_with_tuner tmpdb tools)
 
-add_executable(db_runner_motivating ${CMAKE_SOURCE_DIR}/tools/db_runner_motivating.cpp)
-target_link_libraries(db_runner_motivating tmpdb tools)
+add_executable(db_runner_sampling ${CMAKE_SOURCE_DIR}/tools/db_runner_sampling.cpp)
+target_link_libraries(db_runner_sampling tmpdb tools)
+
+add_executable(db_runner_main ${CMAKE_SOURCE_DIR}/tools/db_runner_main.cpp)
+target_link_libraries(db_runner_main tmpdb tools)
+
+add_executable(db_runner_default ${CMAKE_SOURCE_DIR}/tools/db_runner_default.cpp)
+target_link_libraries(db_runner_default tmpdb tools)
 
 add_executable(key_gen ${CMAKE_SOURCE_DIR}/tools/key_gen.cpp)
 target_link_libraries(key_gen tmpdb tools)

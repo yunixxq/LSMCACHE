@@ -19,13 +19,13 @@ config_yaml_path = os.path.join("motivating_exp/config/config_sampling_exp.yaml"
 with open(config_yaml_path) as f:
     config = yaml.load(f, Loader=yaml.FullLoader)
 
-skewness_values = [0.7, 0.8, 0.9, 0.99]
+skewness_values = [0.8, 0.9]
 alpha_values = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]
 
 workloads = [
-    (0.00, 0.90, 0.00, 0.10), # writes = 10%
-    (0.00, 0.80, 0.00, 0.20), # writes = 20%
-    (0.00, 0.70, 0.00, 0.30), # writes = 30%
+    # (0.00, 0.90, 0.00, 0.10), # writes = 10%
+    # (0.00, 0.80, 0.00, 0.20), # writes = 20%
+    # (0.00, 0.70, 0.00, 0.30), # writes = 30%
     (0.00, 0.60, 0.00, 0.40), # writes = 40%
     (0.00, 0.50, 0.00, 0.50), # writes = 50%
 ]

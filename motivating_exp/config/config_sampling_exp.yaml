@@ -9,7 +9,7 @@ app:
     DATABASE_PATH: "/data"
 
 output_path:
-    sampling_exp_output: "data/sampling_exp_results.csv"
+    sampling_exp_output: "data/calm/sampling_exp_results.csv"
     results_dir: "results"
 
 # sampling result 1
@@ -60,9 +60,9 @@ lsm_tree_config:
 #     h: 5                 # Bloom filter bits per element
 
 xgb_model:
-    calm_xgb_base_model: "models/calm_xgb_base_model.pkl"
+    calm_xgb_base_model: "data/calm/models/calm_xgb_base_model.pkl"
     calm_xgb_full_model: "models/calm_xgb_full_model.pkl"
 
 lgb_model:
-    calm_lgb_base_model: "models/calm_lgb_base_model.pkl"
-    calm_lgb_full_model: "models/calm_lgb_full_model.pkl"
+    calm_lgb_base_model: "data/calm/models/calm_lgb_base_model.pkl"
+    calm_lgb_full_model: "data/calm/models/calm_lgb_full_model.pkl"

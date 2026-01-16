@@ -42,3 +42,5 @@ key_log*
 .mypy_cache
 .vscode
 data/
+models/
+results/

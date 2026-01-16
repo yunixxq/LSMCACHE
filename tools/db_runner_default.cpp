@@ -23,7 +23,6 @@
 // 自定义组件
 #include "tmpdb/compactor.hpp"
 #include "infrastructure/data_generator.hpp"
-#include "tmpdb/memory_tuner.hpp"  // ✅ 添加Memory Tuner
 #include "tmpdb/progress_bar.hpp"
 
 using namespace ROCKSDB_NAMESPACE;
@@ -95,17 +94,8 @@ typedef struct environment
     size_t N = 1e6;
     size_t L = 0;
     size_t M = 0; // 总内存预算
-    size_t initial_write_memory = 64 * 1024 * 1024; // 初始写内存大小
-    
-    // ===== Memory Tuner配置（论文Breaking Walls） =====
-    bool enable_memory_tuner = true;   // 默认情况下启用Memory Tuner
-    double write_weight = 1.0;          // ω: 写成本权重 默认均为1
-    double read_weight = 1.0;           // γ: 读成本权重
-    size_t sim_cache_size = 128 * 1024 * 1024;  // SimCache大小 128M 单位:bytes
-    size_t tuning_interval_seconds = 180;       // 调优间隔（秒）
-    size_t min_tuning_interval_seconds = 20;    // 最小调优间隔
-              
-    std::string exp_output_file = "/data/memory_tuner_results.csv";  // 实验输出文件
+     
+    std::string exp_output_file = "/data/default/exp_result.txt";  // 实验输出文件
 
     // 其他配置
     int verbose = 0;
@@ -115,7 +105,6 @@ typedef struct environment
     int seed = 0;
     std::string dist_mode = "zipfian";
     double skew = 0.5;
-    std::string key_log_file;
 
 } environment;
 
@@ -136,7 +125,6 @@ environment parse_args(int argc, char *argv[])
         (value("db_path", env.db_path)) % "path to the db",
         (option("-N", "--entries") & integer("num", env.N)) % "total entries",
         (option("-T", "--size-ratio") & number("ratio", env.T)) % "size ratio",
-        (option("-B", "--initial-buffer-size") & integer("size", env.initial_write_memory)) % "buffer size",
         (option("-M", "--total-memory-size") & integer("size", env.M)) % "total memory size",
         (option("-E", "--entry-size") & integer("size", env.E)) % "entry size",
         (option("-b", "--bpe") & number("bits", env.bpe)) % "bits per element",
@@ -220,19 +208,12 @@ void wait_for_compactions(rocksdb::DB *db, tmpdb::Compactor *compactor)
 }
 
 void reset_all_statistics(rocksdb::Options &rocksdb_opt, 
-                          tmpdb::Compactor *compactor,
-                          tmpdb::MemoryTuner* memory_tuner)
+                          tmpdb::Compactor *compactor)
 {
     rocksdb_opt.statistics->Reset();
     rocksdb::get_iostats_context()->Reset();
     rocksdb::get_perf_context()->Reset();
     compactor->stats.reset_epoch();
-
-    // 重置Memory Tuner统计
-    if (memory_tuner) {
-        memory_tuner->reset_statistics();
-        memory_tuner->reset_tuning_timer(); // 显式设置调优起点 / 而非初始注入数据时
-    }
 }
 
 int run_experiment(environment &env)
@@ -249,7 +230,7 @@ int run_experiment(environment &env)
     result.read_ratio_2 = env.read_ratio_2;
     result.write_ratio_2 = env.write_ratio_2;
 
-    // ==================== Step 2: 配置 RocksDB ====================
+    // ==================== 配置 RocksDB ====================
     std::string db_path = env.db_path + "_memory_tuner";
     // 销毁旧数据库
     rocksdb::DestroyDB(db_path, rocksdb::Options());
@@ -277,20 +258,17 @@ int run_experiment(environment &env)
     // 写日志长度: rocksdb_opt.max_log_file_size
 
     // 设置初始write buffer大小
-    size_t initial_write_memory = env.initial_write_memory;  // 默认使用-B参数
-    if (env.M > 0 && env.enable_memory_tuner) {
-        // 使用总内存和alpha计算初始write memory
-        initial_write_memory = env.initial_write_memory;
-    }
-    rocksdb_opt.write_buffer_size = initial_write_memory; // ✅ 实际配置写内存参数
-    spdlog::info("Initial write buffer size: {} MB", initial_write_memory / (1024 * 1024));
+    size_t Mb = 64 * 1024 * 1024;  // 使用默认参数 64MB
+    size_t Mc = env.M - Mb;  // 剩余内存全部分配给 Block Cache
+    rocksdb_opt.write_buffer_size = Mb; // ✅ 实际配置写内存参数
+    spdlog::info("Write buffer size: {} MB", Mb / (1024 * 1024));
 
-    // ==================== Step 3: 配置自定义 Compactor ====================
+    // ==================== 配置自定义 Compactor ====================
     tmpdb::Compactor *compactor = nullptr;
     tmpdb::CompactorOptions compactor_opt;
     
     compactor_opt.size_ratio = env.T;
-    compactor_opt.buffer_size = initial_write_memory;
+    compactor_opt.buffer_size = Mb;
     compactor_opt.entry_size = env.E;
     compactor_opt.bits_per_element = env.bpe;
     compactor_opt.num_entries = env.N;
@@ -302,14 +280,14 @@ int run_experiment(environment &env)
     else
         compactor_opt.K = env.K;
 
-    compactor_opt.levels = tmpdb::Compactor::estimate_levels(env.N, env.T, env.E, initial_write_memory) 
+    compactor_opt.levels = tmpdb::Compactor::estimate_levels(env.N, env.T, env.E, Mb) 
                            * compactor_opt.K + 1;
     rocksdb_opt.num_levels = compactor_opt.levels + 1;
 
     compactor = new tmpdb::Compactor(compactor_opt, rocksdb_opt);
     rocksdb_opt.listeners.emplace_back(compactor);
 
-    // ==================== Step 4: 配置 Block Cache ====================
+    // ==================== 配置 filter + Block Cache ====================
     rocksdb::BlockBasedTableOptions table_options;
     table_options.read_amp_bytes_per_bit = 32;
 
@@ -319,45 +297,15 @@ int run_experiment(environment &env)
             compactor_opt.size_ratio,
             compactor_opt.levels));
     
-    // ✅ env.sim_cache_size 指的是额外增加的块缓存大小
-    std::shared_ptr<Cache> block_cache = nullptr;
-    std::shared_ptr<rocksdb::SimCache> sim_cache = nullptr;  // ✅ 模拟缓存
-    
-    // ✅ 初始块缓存设置
-    // 4GB = 4 * 1024 MB = 4096MB 20GB = 20 * 1024MB = 20480MB
-    // 初始块缓存 = 4096 - 64 = 4032MB / 20480 - 64 = 20416MB
-    size_t initial_cache_size = env.M - env.initial_write_memory;
-    if (env.M > 0 && env.enable_memory_tuner) {
-        // 使用总内存和alpha计算初始cache大小
-        initial_cache_size = env.M - initial_write_memory; // ✅ 计算初始分配的块缓存大小
-    }
-    
-    if (initial_cache_size == 0) {
-        table_options.no_block_cache = true;
-    } else {
-        block_cache = rocksdb::NewLRUCache(initial_cache_size);
-        
-        // ✅ SimCache容量 = 实际缓存 + 128MB，模拟"如果缓存再大128MB"
-        if (env.enable_memory_tuner && env.sim_cache_size > 0) {
-            size_t sim_total_size = initial_cache_size + env.sim_cache_size;
-            sim_cache = rocksdb::NewSimCache(block_cache, sim_total_size, -1);
-            table_options.block_cache = sim_cache;
-            spdlog::info("Block cache: {} MB, SimCache total: {} MB (= cache + {} MB)",
-                         initial_cache_size / (1024 * 1024),
-                         sim_total_size / (1024 * 1024),
-                         env.sim_cache_size / (1024 * 1024));
-        } else {
-            table_options.block_cache = block_cache;
-            spdlog::info("Initial block cache size: {} MB", initial_cache_size / (1024 * 1024));
-        }
-    }
+    std::shared_ptr<Cache> block_cache = rocksdb::NewLRUCache(Mc);  
+    table_options.block_cache = block_cache;     
     
     rocksdb_opt.table_factory.reset(
         rocksdb::NewBlockBasedTableFactory(table_options));
 
     rocksdb_opt.statistics = rocksdb::CreateDBStatistics();
 
-    // ==================== Step 5: 打开数据库 ====================
+    // ==================== 打开数据库 ====================
     rocksdb::DB *db = nullptr;
     rocksdb::Status status = rocksdb::DB::Open(rocksdb_opt, db_path, &db);
     if (!status.ok())
@@ -367,63 +315,7 @@ int run_experiment(environment &env)
         exit(EXIT_FAILURE);
     }
 
-    // ==================== Step 6: 初始化Memory Tuner ====================
-    tmpdb::MemoryTuner* memory_tuner = nullptr;
-    if (env.enable_memory_tuner)
-    {
-        // 验证必要条件
-        if (env.M == 0) {
-            spdlog::error("Total memory budget (-M) must be specified for memory tuning");
-            exit(EXIT_FAILURE);
-        }
-        if (block_cache == nullptr) {
-            spdlog::error("Block cache must be enabled for memory tuning");
-            exit(EXIT_FAILURE);
-        }
-
-        spdlog::info("=== Memory Tuner Enabled (Breaking Walls Paper) ===");
-        
-        // 配置Memory Tuner
-        tmpdb::MemoryTunerConfig tuner_config;
-        tuner_config.total_memory = env.M; // ✅ 外部传参 总内存大小设置(4GB/16GB)
-        tuner_config.initial_write_memory = env.initial_write_memory; // ✅ 默认的写内存初始值
-        tuner_config.sim_cache_size = env.sim_cache_size; // ✅ 默认128MB 指的是在当前Block Cache基础上补充的容量
-        tuner_config.write_weight = env.write_weight;
-        tuner_config.read_weight = env.read_weight;
-        tuner_config.tuning_interval_seconds = env.tuning_interval_seconds;
-        tuner_config.min_tuning_interval_seconds = env.min_tuning_interval_seconds;
-        tuner_config.K = 3;
-        tuner_config.max_step_ratio = 0.10; // 最大步长比例
-        tuner_config.min_step_size = 32 * 1024 * 1024; // 最小步长
-        tuner_config.min_cost_reduction_ratio = 0.001;
-        tuner_config.page_size = PAGESIZE; // 4K(B)
-        tuner_config.size_ratio = env.T;
-        
-        // 边界配置
-        tuner_config.min_write_memory = 64 * 1024 * 1024;   // 最小64MB
-        tuner_config.min_buffer_cache = 64 * 1024 * 1024;   // 最小64MB
-        
-        // ✅ 创建Memory Tuner
-        memory_tuner = new tmpdb::MemoryTuner(
-            db,
-            block_cache,
-            sim_cache,
-            rocksdb_opt.statistics,
-            compactor, 
-            tuner_config
-        );
-
-        // 建立反向连接，将tuner再传递给compactor二者互相进行调用
-        compactor->set_memory_tuner(memory_tuner);
-        
-        spdlog::info("Memory Tuner Configuration:");
-        spdlog::info("  Total memory: {} MB", env.M / (1024 * 1024));
-        spdlog::info("  Write weight (ω): {:.2f}", env.write_weight);
-        spdlog::info("  Read weight (γ): {:.2f}", env.read_weight);
-        spdlog::info("  SimCache size: {} MB", env.sim_cache_size / (1024 * 1024));
-    }
-
-    // ==================== Step 7: 初始化数据 ====================
+    // ==================== 初始化 + 预热 + 实际混合读写 ====================
     spdlog::info("Initializing data with {} entries...", env.N);
 
     ReadOptions read_options;
@@ -489,7 +381,7 @@ int run_experiment(environment &env)
     std::cout << std::endl;
 
     // 清空前面的统计数据(唯一的一次重置❗️)
-    reset_all_statistics(rocksdb_opt, compactor, memory_tuner);
+    reset_all_statistics(rocksdb_opt, compactor);
 
     data_gen = new YCSBGenerator(env.N, env.dist_mode, env.skew);
 
@@ -502,9 +394,6 @@ int run_experiment(environment &env)
     std::uniform_real_distribution<double> dist(0, 1);
 
     auto time_start = std::chrono::high_resolution_clock::now(); 
-
-    size_t tuning_count = 0;
-    size_t total_adjustments = 0;
 
     int read_ops = 0;
     int write_ops = 0;
@@ -531,54 +420,6 @@ int run_experiment(environment &env)
                 key_value = data_gen->gen_existing_kv_pair(env.E);
                 db->Put(write_opt, key_value.first, key_value.second);
             }
-
-            if (memory_tuner) {
-                memory_tuner->record_operation(1);
-                auto tune_states = memory_tuner->should_tune();
-                if (tune_states.first)
-                {
-                    tuning_count++;
-
-                    // 显示触发原因
-                    std::string trigger_str;
-                    switch (tune_states.second) {
-                        case tmpdb::TuningTrigger::LOG_FLUSH:
-                            trigger_str = "LOG_FLUSH";
-                            break;
-                        case tmpdb::TuningTrigger::TIME_BASED:
-                            trigger_str = "TIME_BASED";
-                            break;
-                        default:
-                            trigger_str = "UNKNOWN";
-                    }
-
-                    spdlog::info("--- Memory Tuning Cycle {} (step {}/{}) read_ops = {} write_ops = {} [Trigger: {}] ---", 
-                            tuning_count, i + 1, env.queries, read_ops, write_ops, trigger_str);
-                    
-                    // 将操作统计置0
-                    read_ops = 0;
-                    write_ops = 0;
-
-                    // 执行调优
-                    bool adjusted = memory_tuner->tune();
-                    
-                    if (adjusted) {
-                        total_adjustments++;
-                        spdlog::info("Memory allocation adjusted");
-                        spdlog::info("  Write memory: {} MB", 
-                                    memory_tuner->get_write_memory_size() / (1024 * 1024));
-                        spdlog::info("  Buffer cache: {} MB", 
-                                    memory_tuner->get_buffer_cache_size() / (1024 * 1024));
-                        
-                        // 更新Compactor的buffer_size配置
-                        // compactor->updateM(memory_tuner->get_write_memory_size());
-                        // 我们在Memory Tuner中更新了这一部分，因此我们在这里检查一下是否正确
-                        if(compactor->compactor_opt.buffer_size == memory_tuner->get_write_memory_size()){
-                            spdlog::info("Compactor中实现了buffer size的同步调整");
-                        }
-                    }
-                } // 符合调优条件
-            } // Memory Tuner 调优检查
             progress.update();
         }
         progress.finish();
@@ -617,20 +458,6 @@ int run_experiment(environment &env)
     result.read_io_kb_per_op = static_cast<double>(total_read_bytes) / (env.queries * 1024.0);
     result.total_io_kb_per_op = result.write_io_kb_per_op + result.read_io_kb_per_op;
 
-    // ==================== Step 10: Memory Tuner统计 ====================
-
-    if (memory_tuner)
-    {
-        spdlog::info("=== Memory Tuner Summary ===");
-        spdlog::info("Total tuning cycles: {}", tuning_count);
-        spdlog::info("Total adjustments: {}", total_adjustments);
-        spdlog::info("Final write memory: {} MB", 
-                     memory_tuner->get_write_memory_size() / (1024 * 1024));
-        spdlog::info("Final buffer cache: {} MB", 
-                     memory_tuner->get_buffer_cache_size() / (1024 * 1024));
-        memory_tuner->print_status();
-    }
-    
     // ==================== 保存结果 ====================    
     std::ofstream ofs;
     ofs.open(env.exp_output_file, std::ios::app);
@@ -639,11 +466,10 @@ int run_experiment(environment &env)
         ofs.close();
     }
 
-    // ==================== Step 11: 清理 ====================
+    // ==================== 清理 ====================
     db->Close();
     delete db;
     delete data_gen;
-    delete memory_tuner;
 
     rocksdb::DestroyDB(db_path, rocksdb::Options());
     ret = system(rm_db_cmd.c_str());
@@ -660,7 +486,7 @@ int main(int argc, char *argv[]){
     // 配置双输出日志：控制台只输出警告以上，文件输出所有info
     auto console_sink = std::make_shared<spdlog::sinks::stdout_color_sink_mt>();
     console_sink->set_level(spdlog::level::warn);  // 控制台只显示警告和错误
-    std::string log_file = "./data/memory_tuner/exp_log.txt";
+    std::string log_file = "./data/default/exp_log.txt";
     auto file_sink = std::make_shared<spdlog::sinks::basic_file_sink_mt>(log_file, true);
     file_sink->set_level(spdlog::level::info);
     auto logger = std::make_shared<spdlog::logger>("tuner_logger", 

@@ -8,6 +8,9 @@ app:
     EXECUTION_PATH: "build/db_runner_with_tuner"
     DATABASE_PATH: "/data"
 
+output_path:
+    main_exp_output: "data/memory_tuner/main_result.csv"
+
 lsm_tree_config:
   E: 1024         # 1KB bytes/entry
   # M: 2147483648   # 2GB bytes
@@ -17,9 +20,5 @@ lsm_tree_config:
   s: 4            # range query selectivity
   T: 5
   h: 5
+  B: 67108864 # initial_memory_buffer = 64MB
 
-
-# 输出路径
-optimizer_path:
-    memory_tuner_ckpt: "data/memory_tuner_ckpt.csv"
-    memory_tuner_final: "data/memory_tuner_final.csv"

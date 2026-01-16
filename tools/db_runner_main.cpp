@@ -8,6 +8,7 @@
 #include <sstream>
 #include <vector>
 #include <cmath>
+#include <thread>
 
 #include "clipp.h"
 #include "spdlog/spdlog.h"
@@ -131,6 +132,9 @@ struct ExpResult
     bool rl_agent_enabled;
     bool jump_start_enabled;
 
+    // 使用的模型类型
+    std::string model_type;
+
     std::string to_csv() const {
         std::ostringstream oss;
         oss << std::fixed << std::setprecision(6)
@@ -154,7 +158,8 @@ struct ExpResult
             << drift_count << ","        // 🆕
             << (converged ? "true" : "false") << ","
             << (rl_agent_enabled ? "true" : "false") << ","
-            << (jump_start_enabled ? "true" : "false");
+            << (jump_start_enabled ? "true" : "false") << ","
+            << model_type;
         return oss.str();
     }
     
@@ -164,16 +169,6 @@ struct ExpResult
             "alpha_initial,alpha_final,Mbuf_MB,Mcache_MB,"
             "H_cache,write_io_kb_per_op,read_io_kb_per_op,total_io_kb_per_op,"
             "latency,rl_epochs_count,drift_count,converged,rl_agent_enabled,jump_start_enabled";
-    }
-
-    // 输出alpha历史
-    std::string alpha_history_str() const {
-        std::ostringstream oss;
-        for (size_t i = 0; i < alpha_history.size(); i++) {
-            if (i > 0) oss << ";";
-            oss << std::fixed << std::setprecision(4) << alpha_history[i];
-        }
-        return oss.str();
     }
 
     void save_epoch_details(const std::string& filepath) const {
@@ -241,7 +236,10 @@ typedef struct environment
     // 输出文件
     std::string exp_output_file = "/data/main_results.csv";  // 实验输出文件
     std::string epoch_output_file = "/data/epoch_results.csv";
-              
+
+    // 选择的offline模型类型
+    std::string model_type = "lgb_full";
+
     // 其他配置
     int verbose = 0;
     bool destroy_db = true;
@@ -295,7 +293,8 @@ environment parse_args(int argc, char *argv[])
         (option("--rl-agent").set(env.enable_rl_tuning, true)) % "Enable RL agent tuning",
         (option("--no-rl-agent").set(env.enable_rl_tuning, false)) % "Disable RL agent tuning",
         (option("--jump-start").set(env.enable_jump_start, true)) % "Enable drift detection and jump start",
-        (option("--no-jump-start").set(env.enable_jump_start, false)) % "Disable drift detection"
+        (option("--no-jump-start").set(env.enable_jump_start, false)) % "Disable drift detection",
+        (option("--model-type") & value("type", env.model_type)) % "Model type (lgb_base/lgb_full/xgb_base/xgb_full)"
     );
 
     auto rl_opt = "RL tuning options:" % (
@@ -454,33 +453,6 @@ void reset_all_statistics(rocksdb::Options &rocksdb_opt,
 
 int run_experiment(environment &env)
 {
-    // ==================== 配置日志信息 ====================
-    // 配置双输出日志：控制台只输出警告以上，文件输出所有info
-    auto console_sink = std::make_shared<spdlog::sinks::stdout_color_sink_mt>();
-    console_sink->set_level(spdlog::level::warn);  // 控制台只显示警告和错误
-
-    string output_name;
-    if(env.enable_rl_tuning && env.enable_jump_start){
-        output_name = "rl_on_js_on";
-    } else if(!env.enable_rl_tuning && !env.enable_jump_start){
-        output_name = "rl_off_js_off";
-    } else if(env.enable_rl_tuning && !env.enable_jump_start){
-        output_name = "rl_on_js_off";
-    } else {
-        output_name = "rl_off_js_on";
-    }
- 
-
-    std::string log_file = "./data/online_tuning_log_" + output_name + ".txt";
-    auto file_sink = std::make_shared<spdlog::sinks::basic_file_sink_mt>(log_file, true);
-    file_sink->set_level(spdlog::level::info);  // 文件记录所有info
-
-    auto logger = std::make_shared<spdlog::logger>("tuner_logger", 
-        spdlog::sinks_init_list{console_sink, file_sink});
-    logger->set_level(spdlog::level::info);
-    spdlog::set_default_logger(logger);
-    spdlog::set_pattern("[%Y-%m-%d %T.%e][%l] %v");
-
     ExpResult result;
 
     result.M = env.M;
@@ -494,13 +466,14 @@ int run_experiment(environment &env)
     result.write_ratio_2 = env.write_ratio_2;
 
     result.alpha_initial = env.alpha1;
-    result.alpha_final = env.alpha1;
     result.rl_epochs_count = 0;
     result.drift_count = 0;
     result.converged = false;
 
     result.rl_agent_enabled = env.enable_rl_tuning;
     result.jump_start_enabled = env.enable_jump_start;
+
+    result.model_type = env.model_type;
 
     // 计算初始情况下的内存分配-写内存+块缓存
     size_t Mbuf = static_cast<size_t>(env.alpha1 * env.M);
@@ -515,7 +488,10 @@ int run_experiment(environment &env)
     // 销毁旧数据库
     rocksdb::DestroyDB(db_path, rocksdb::Options());
     std::string rm_db_cmd = "rm -rf " + db_path;
-    system(rm_db_cmd.c_str());
+    int ret = system(rm_db_cmd.c_str());
+    if (ret != 0) {
+        spdlog::warn("Failed to execute: {}, return code: {}", rm_db_cmd, ret);
+    }
 
     // ==================== 配置 RocksDB ====================
     rocksdb::Options rocksdb_opt;
@@ -684,7 +660,7 @@ int run_experiment(environment &env)
     StatsSnapshot epoch_start_snap = get_current_stats_snapshot(rocksdb_opt);
     
     double read_ratio = 0;
-    int curr_read_ops = 0;
+    int last_read_ops = 0, curr_read_ops = 0;
 
     // 设置为1是因为我们的epoch足够大
     tmpdb::DriftDetector drift_detector(env.drift_threshold, 1);
@@ -720,16 +696,67 @@ int run_experiment(environment &env)
                     current_epoch, rl_tuner.current_alpha(), epoch_ops);
 
                 // 首先检查是否发生漂移 - 若漂移则JumpStart 不用RL-tune
-                double curr_read_ratio = static_cast<double>(curr_read_ops) / epoch_ops;
-                bool drift = drift_detector.observe(curr_read_ratio);
+                bool drift = false;
+                double curr_read_ratio = 0.0, last_read_ratio = 0.0;
+                if(current_epoch > 0) {
+                    curr_read_ratio = static_cast<double>(curr_read_ops) / epoch_ops;
+                    last_read_ratio = static_cast<double>(last_read_ops) / epoch_ops;
+
+                    if(std::abs(curr_read_ratio - last_read_ratio) > env.drift_threshold){
+                        spdlog::info("🚨 Drift detected! curr_ratio={:.3f}, last_ratio={:.3f}", 
+                        curr_read_ratio, last_read_ratio);
+                        drift = true;
+                    }
+                }
 
                 double new_alpha;
 
                 if(drift && env.enable_jump_start){
-                   spdlog::info("🚨 Drift detected!");
-                   rl_tuner.on_drift_detected(env.alpha2, curr_read_ratio);
-                   new_alpha = env.alpha2;
-                   result.drift_count++; 
+                    spdlog::info("Requesting model prediction...");
+
+                    auto pred_start = std::chrono::high_resolution_clock::now();
+                    // ===== 新增：请求Python模型预测 =====
+                    // 1. 写入请求
+                    {
+                        std::ofstream fout("workload.in");
+                        fout << curr_read_ratio << " "
+                            << (1.0 - curr_read_ratio) << " "
+                            << env.skew << " "
+                            << env.T << " "
+                            << (env.M / (1024.0 * 1024.0)) << " "
+                            << env.N << std::endl;
+                    }
+
+                    // 2. 等待结果（带超时）
+                    double new_predicted_alpha = -1.0;
+                    for (int wait = 0; wait < 500; wait++) {  // 最多等5秒
+                        std::ifstream fin("optimal_alpha.in");
+                        if (fin.is_open() && (fin >> new_predicted_alpha)) {
+                            fin.close();
+                            std::remove("optimal_alpha.in");
+                            break;
+                        }
+                        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                    }
+                    
+                    auto pred_end = std::chrono::high_resolution_clock::now();
+                    auto pred_latency_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                        pred_end - pred_start).count();
+
+                    // 3. 使用预测结果
+                    if (new_predicted_alpha > 0) {
+                        spdlog::info("   Model predicted α* = {:.3f} (latency: {}ms)", 
+                                    new_predicted_alpha, pred_latency_ms);
+                        new_alpha = new_predicted_alpha;  // ✅ 使用预测值
+                    } else {
+                        spdlog::warn("   Prediction timeout after {}ms, using fallback α* = {:.3f}", 
+                                    pred_latency_ms, env.alpha2);
+                        new_alpha = env.alpha2;  // 回退到预设值
+                    }
+
+                    rl_tuner.on_drift_detected(new_alpha, curr_read_ratio);
+                    // new_alpha = env.alpha2;
+                    result.drift_count++; 
                 } else if(env.enable_rl_tuning){ // 正常RL更新
                     tmpdb::EpochPerf perf(epoch_stats.H_cache, epoch_stats.latency_ms,
                               epoch_stats.total_io_kb_per_op, curr_read_ratio);
@@ -769,6 +796,7 @@ int run_experiment(environment &env)
                 result.alpha_history.push_back(new_alpha);
 
                 // 重置
+                last_read_ops = curr_read_ops;
                 curr_read_ops = 0;
                 epoch_ops = 0;
                 current_epoch++;
@@ -817,7 +845,10 @@ int run_experiment(environment &env)
     delete data_gen;
     
     rocksdb::DestroyDB(db_path, rocksdb::Options());
-    system(rm_db_cmd.c_str());
+    ret = system(rm_db_cmd.c_str());
+    if (ret != 0) {
+        spdlog::warn("Failed to execute: {}, return code: {}", rm_db_cmd, ret);
+    }
     // ==================== 保存结果 ====================
     std::ofstream ofs;
     if (env.append_mode) {
@@ -840,9 +871,33 @@ int run_experiment(environment &env)
 
 int main(int argc, char *argv[])
 {
-    spdlog::set_pattern("[%T.%e]%^[%l]%$ %v");
-
     environment env = parse_args(argc, argv);
+
+    // ==================== 配置日志信息 ====================
+    // 配置双输出日志：控制台只输出警告以上，文件输出所有info
+    auto console_sink = std::make_shared<spdlog::sinks::stdout_color_sink_mt>();
+    console_sink->set_level(spdlog::level::warn);  // 控制台只显示警告和错误
+
+    std::string output_name;
+    if(env.enable_rl_tuning && env.enable_jump_start){
+        output_name = "rl_on_js_on";
+    } else if(!env.enable_rl_tuning && !env.enable_jump_start){
+        output_name = "rl_off_js_off";
+    } else if(env.enable_rl_tuning && !env.enable_jump_start){
+        output_name = "rl_on_js_off";
+    } else {
+        output_name = "rl_off_js_on";
+    }
+ 
+    std::string log_file = "./data/calm/exp_log_" + output_name + ".txt";
+    auto file_sink = std::make_shared<spdlog::sinks::basic_file_sink_mt>(log_file, true);
+    file_sink->set_level(spdlog::level::info);  // 文件记录所有info
+
+    auto logger = std::make_shared<spdlog::logger>("tuner_logger", 
+        spdlog::sinks_init_list{console_sink, file_sink});
+    logger->set_level(spdlog::level::info);
+    spdlog::set_default_logger(logger);
+    spdlog::set_pattern("[%Y-%m-%d %T.%e][%l] %v");
 
     if (env.verbose == 1)
     {

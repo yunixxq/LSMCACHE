@@ -22,7 +22,6 @@ def build_features(N, M_MB, T, alpha, r, w, s, feature_type: str = "full") -> li
         # w,
         read_write_ratio,
         s, # skewness
-        T,
         M_MB,
         data_size_mb / M_MB,
         alpha,
@@ -43,7 +42,6 @@ def build_features(N, M_MB, T, alpha, r, w, s, feature_type: str = "full") -> li
     return base_features + extend_features
 
 def predict_best_alpha(cost_model, r, w, s, T, M_MB, N, feature_type):
-    start_time = time.time()
     xs = [] # 记录所有候选参数组合经过get_cost_uniform()的特征向量
     settings = [] # 保存所有可能的alpha值
 
@@ -53,11 +51,9 @@ def predict_best_alpha(cost_model, r, w, s, T, M_MB, N, feature_type):
         xs.append(x)
 
     X = np.array(xs) # 所有参数配置(不同alpha)
-    Hcaches = cost_model.predict(X) # 2646组参数配置对应的成本
+    Hcaches = cost_model.predict(X)
     
     best_idx = np.argmax(Hcaches)
     best_alpha = settings[best_idx]
-
-    print(time.time() - start_time)
     
     return best_alpha

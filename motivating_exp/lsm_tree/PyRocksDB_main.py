@@ -51,6 +51,7 @@ class RocksDB(object):
         # 输出文件目录
         exp_output_file: str = "/data/main_results.csv",
         epoch_output_file: str = "/data/epoch_results.csv",
+        model_type: str = "lgb_full",
         is_leveling_policy: bool = True,
     ) -> Dict:
         
@@ -95,6 +96,7 @@ class RocksDB(object):
             f"--rl-epsilon-min {rl_epsilon_min}",
             f"--rl-ucb-c {rl_ucb_c}",
             f"--epoch-ops {epoch_ops}",
+            f"--model-type {model_type}",
             "--append", 
         ]
 

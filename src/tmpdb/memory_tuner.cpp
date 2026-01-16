@@ -468,7 +468,7 @@ size_t MemoryTuner::newton_raphson_step(size_t current_x, double current_derivat
     double A, B;
     
     // 尝试使用线性拟合 xi+1 = xi - cost'(xi) / A 
-    if (fit_linear_model(A, B) && std::abs(A) > 1e-20) {
+    if (fit_linear_model(A, B) && std::abs(A) > 1e-12) {
         // double step = current_derivative / A;
         double step_mb = current_derivative / A;
         
@@ -691,6 +691,12 @@ void MemoryTuner::collect_from_statistics() {
     if(sim_cache_){
         uint64_t delta_sim_hits = get_delta(rocksdb::SIM_BLOCK_CACHE_HIT);
         uint64_t delta_actual_hits = cache_hits;  // 复用上面已计算的值
+
+        // 确保 delta_sim_hits >= delta_actual_hits
+        if (delta_sim_hits < delta_actual_hits) {
+            spdlog::warn("Unexpected: sim_hits({}) < actual_hits({})", 
+                        delta_sim_hits, delta_actual_hits);
+        }
 
         // saved_hits (单位：pages)
         int64_t saved_hits = static_cast<int64_t>(delta_sim_hits) - 
